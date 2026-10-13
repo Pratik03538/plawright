@@ -174,12 +174,16 @@ def main() -> None:
             channel=BROWSER_CHANNEL,
             headless=False,
             no_viewport=True,
-            args=["--start-maximized"],
+            # Use Chrome's normal Windows sandbox and keep extensions disabled
+            # for this diagnostic run. This may help distinguish browser-profile/
+            # extension interference from a Chess.com bot-engine issue.
+            ignore_default_args=["--no-sandbox"],
+            args=["--start-maximized", "--disable-extensions"],
         )
         try:
             page = context.pages[0] if context.pages else context.new_page()
             page.set_default_timeout(10000)
-            print(f"[DOM INSPECTOR] Browser channel: {BROWSER_CHANNEL}")
+            print(f"[DOM INSPECTOR] Browser channel: {BROWSER_CHANNEL} | extensions=disabled | sandbox=default")
             print(f"[DOM INSPECTOR] Dedicated profile: {PROFILE_DIR}")
 
             # Diagnostic-only network logging: redact query strings/fragments so
