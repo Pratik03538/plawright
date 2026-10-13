@@ -109,7 +109,8 @@ def main() -> None:
 
         last_fen = fen
         actor = payload.get("actor") or "unknown"
-        ply = payload.get("ply") or "?"
+        ply_value = payload.get("ply")
+        ply = ply_value if ply_value is not None and ply_value != "" else "?"
         last_move = payload.get("lastMove") or "—"
         moves = payload.get("moves") or "(move list not exposed)"
         print(f"\n[DOM EVENT] ply={ply} | actor={actor} | last_move={last_move}")
