@@ -21,6 +21,22 @@ The username defaults to `diamond_membership-free`. On the first run, the script
 The script opens `https://www.chess.com/play/computer/Hikaru-bot`, requires that exact Hikaru URL before clicking, and ignores the general bot-picker navigation link. It does not make any chess moves. Keep the terminal running while you use the separate Chrome window; press Enter in the terminal to close that Playwright window.
 
 
+## Playwright live game and move-time tracker (read-only)
+
+This script launches Chrome as a normal process with a separate persistent profile, then attaches Playwright over Chrome DevTools Protocol to **read** the rendered Chess.com page. It does not click buttons, send moves, or call game APIs.
+
+Close any Chrome window already using `.normal_chrome_profile`, then run:
+
+```powershell
+git pull --ff-only origin main
+python -m py_compile .\playwright_live_game_tracker.py
+python .\playwright_live_game_tracker.py
+```
+
+In the opened Chrome, log in if needed and play normally. The terminal reports game detection and newly observed moves; records are appended to `chesscom_live_moves.csv`. Stop tracking with Ctrl+C; the Chrome window is intentionally left open.
+
+Timing is an estimate based on the interval between live move-list updates (about 250 ms polling) and may differ from an official per-move clock value. Moves already present when tracking starts are saved with unknown timing. The supplied saved HTML is a page shell, so live moves/clocks are read from the fully rendered page after its JavaScript finishes loading.
+
 ## Browser mode: reuse your existing Chrome window
 
 This build can attach to the already-open Chrome instance so Chess.com loads with that browser's normal setup. It will find the existing Chess.com Computer tab and will not navigate the ChatGPT tab.
