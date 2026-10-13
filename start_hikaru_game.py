@@ -197,7 +197,7 @@ def game_looks_active(page) -> bool:
         )
         body = page_text(page)
         active_words = re.search(
-            r"\b(resign|offer draw|claim draw|new game|takeback)\b",
+            r"\b(resign|offer draw|claim draw|takeback)\b",
             body,
             re.I,
         )
