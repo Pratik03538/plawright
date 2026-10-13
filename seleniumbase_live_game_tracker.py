@@ -304,6 +304,10 @@ SNAPSHOT_JS = r"""return (() => {
   }
 
   let domTurn = '';
+  const activeClockForTurn = clocks.find(item => /clock-player-turn/i.test(item.context || ''));
+  if (activeClockForTurn && (activeClockForTurn.side === 'White' || activeClockForTurn.side === 'Black')) {
+    domTurn = activeClockForTurn.side;
+  }
   const turnSelectors = [
     '[aria-label*="to move" i]','[data-cy*="turn"]','[class*="turn-indicator"]',
     '[class*="side-to-move"]','[class*="player-to-move"]'
