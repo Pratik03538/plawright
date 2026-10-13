@@ -12,6 +12,13 @@ import csv
 import os
 import re
 import subprocess
+
+try:
+    import chess
+except ImportError as exc:
+    raise SystemExit(
+        "python-chess missing. Run: .\\venv\\Scripts\\python.exe -m pip install python-chess"
+    ) from exc
 import time
 from datetime import datetime
 from pathlib import Path
@@ -137,7 +144,7 @@ SNAPSHOT_JS = r"""return (() => {
   } catch (_) {}
   const resultRe = /\b(checkmate|stalemate|game over|you won|you lost|white wins|black wins|won on time|resignation|resigned|draw by|drawn game|game aborted)\b/i;
   let resultVisible = false;
-  for (const sel of ['[class*="game-over"]','[class*="game-result"]','[data-cy*="game-result"]','[role="dialog"]']) {
+  for (const sel of ['[class*="game-over"]','[class*="game-result"]','[data-cy*="game-result"]','[data-cy*="game-over"]']) {
     try {
       if (Array.from(document.querySelectorAll(sel)).some(el => visible(el) && resultRe.test(el.innerText || el.textContent || ''))) {
         resultVisible = true; break;
@@ -241,13 +248,29 @@ def is_chess_page(url: str) -> bool:
 
 
 def parse_moves(snapshot: dict) -> list[str]:
+    """Return only a legal SAN prefix; reject partial/garbled figurine text."""
     best: list[str] = []
     best_text = ""
     for candidate in snapshot.get("moveTexts", []):
         text = str(candidate.get("text", "")).translate(FIGURINE_MAP)
         found = [token.strip() for token in SAN_PATTERN.findall(text)]
-        if found and (len(found) > len(best) or (len(found) == len(best) and len(text) > len(best_text))):
-            best, best_text = found, text
+        if not found:
+            continue
+
+        board = chess.Board()
+        legal_prefix: list[str] = []
+        for token in found:
+            try:
+                move = board.parse_san(token)
+            except (ValueError, chess.IllegalMoveError, chess.AmbiguousMoveError):
+                break
+            legal_prefix.append(board.san(move))
+            board.push(move)
+
+        if len(legal_prefix) > len(best) or (
+            len(legal_prefix) == len(best) and len(legal_prefix) and len(text) > len(best_text)
+        ):
+            best, best_text = legal_prefix, text
     return best
 
 
@@ -298,6 +321,9 @@ def main() -> None:
     last_clock_signature: tuple[str, ...] = ()
     last_wait_message = 0.0
     warned_move_list = False
+    result_visible_streak = 0
+    completed_game_urls: set[str] = set()
+    last_debug_signature = ""
 
     try:
         while True:
@@ -335,6 +361,17 @@ def main() -> None:
             now = now_iso()
             mono = time.monotonic()
 
+            if snapshot.get("resultVisible"):
+                result_visible_streak += 1
+            else:
+                result_visible_streak = 0
+
+            if os.environ.get("CHESS_DOM_DEBUG") == "1" and snapshot.get("moveTexts"):
+                signature = repr([(item.get("selector"), item.get("text", "")[:220]) for item in snapshot["moveTexts"][:8]])
+                if signature != last_debug_signature:
+                    print("[DOM DEBUG] move-list candidates (raw text):", signature)
+                    last_debug_signature = signature
+
             ticked = False
             if len(clocks) == 2 and len(last_clock_signature) == 2:
                 old = [num_clock(x) for x in last_clock_signature]
@@ -348,31 +385,35 @@ def main() -> None:
                     "game_started_at": active_game["started_at"], "move_observed_at": now,
                     "note": "Chess.com URL changed"
                 })
+                completed_game_urls.add(active_game["url"])
                 print("[GAME END] Page changed.")
                 active_game, last_moves = None, []
+                result_visible_streak = 0
 
             last_url = url
             parsed = urlsplit(url)
             # A board on /play/online or another lobby is only a preview.
             # Since is_chess_page() accepts only /game/{id}, this is an actual game page.
             start_candidate = (
-                bool(re.fullmatch(r"/game/(?:live/)?\d+", parsed.path.rstrip("/")))
+                url not in completed_game_urls
+                and bool(re.fullmatch(r"/game/(?:live/)?\d+", parsed.path.rstrip("/")))
                 and snapshot.get("boardVisible")
                 and (
                     snapshot.get("activeControls")
                     or ticked
                     or (bool(moves) and len(snapshot.get("clocks", [])) >= 2)
                 )
-                and not snapshot.get("resultVisible")
+                and result_visible_streak == 0
             )
 
-            if active_game and snapshot.get("resultVisible"):
+            if active_game and result_visible_streak >= 3:
                 append_csv({
                     "event": "GAME_ENDED", "game_id": active_game["id"], "game_url": active_game["url"],
                     "game_started_at": active_game["started_at"], "move_observed_at": now,
-                    "note": "Result shown in visible page DOM"
+                    "note": "Explicit game-result container remained visible for 3 polls"
                 })
-                print("[GAME END] Result shown.")
+                completed_game_urls.add(active_game["url"])
+                print("[GAME END] Result stayed visible; game marked finished.")
                 active_game, last_moves = None, []
 
             if active_game and (
