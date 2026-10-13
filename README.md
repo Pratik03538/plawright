@@ -21,6 +21,22 @@ The username defaults to `diamond_membership-free`. On the first run, the script
 The script opens `https://www.chess.com/play/computer/Hikaru-bot`, requires that exact Hikaru URL before clicking, and ignores the general bot-picker navigation link. It does not make any chess moves. Keep the terminal running while you use the separate Chrome window; press Enter in the terminal to close that Playwright window.
 
 
+## Selenium live game and move-time tracker (read-only)
+
+This alternative launches Chrome with a dedicated persistent profile and local debugging port, then Selenium attaches to the already-running Chrome window. It reads visible Chess.com DOM only: it does not click, start a game, or send moves.
+
+Close every Chrome window using `.normal_chrome_profile` first, then run:
+
+```powershell
+.\venv\Scripts\python.exe -m pip install -U selenium
+git fetch origin main
+git show origin/main:selenium_live_game_tracker.py | Set-Content -Encoding utf8 .\selenium_live_game_tracker.py
+.\venv\Scripts\python.exe -m py_compile .\selenium_live_game_tracker.py
+.\venv\Scripts\python.exe .\selenium_live_game_tracker.py
+```
+
+Log into Chess.com and start your game manually in that Chrome window. The terminal reports detected games/moves and appends events to `chesscom_live_moves_selenium.csv`. Stop with Ctrl+C; the Chrome window stays open. Time per move is an estimate based on the time between displayed move-list updates, not an official clock measurement. Existing moves when the tracker attaches have no recoverable timing.
+
 ## Playwright live game and move-time tracker (read-only)
 
 This script launches Chrome as a normal process with a separate persistent profile, then attaches Playwright over Chrome DevTools Protocol to **read** the rendered Chess.com page. It does not click buttons, send moves, or call game APIs.
