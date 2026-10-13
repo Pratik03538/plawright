@@ -1796,7 +1796,8 @@ def draw_move_history_panel(
             and not overlaps(rect, board_rect)
             and not overlaps(rect, controls_rect)
         ):
-            panel_x, panel_y = cx, cy            break
+            panel_x, panel_y = cx, cy
+            break
 
     panel_x = max(
         4,
@@ -2695,7 +2696,8 @@ def load_assets():
             continue
 
         if len(img.shape) != 3 or img.shape[2] != 4:
-            print(f"[WARN] {fname} must be BGRA PNG with transparency.")            continue
+            print(f"[WARN] {fname} must be BGRA PNG with transparency.")
+            continue
 
         alpha = img[:, :, 3]
         coords = cv2.findNonZero(alpha)
@@ -13483,7 +13485,8 @@ def main():
 
                     if requested_action is None:
                         if match_ui.get("rematch_enabled"):
-                            requested_action = "REMATCH"                        elif match_ui.get("new_match_enabled"):
+                            requested_action = "REMATCH"
+                        elif match_ui.get("new_match_enabled"):
                             requested_action = "NEW MATCH"
 
                     auto_due = (
