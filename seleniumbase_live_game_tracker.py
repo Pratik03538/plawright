@@ -940,7 +940,7 @@ def main() -> None:
                     print("[DEBUG] URL:", url, "| title:", snapshot.get("title"))
                     warned_move_list = True
 
-            elif time.monotonic() - last_wait_message > 10:
+            elif time.monotonic() - last_wait_message > 30:
                 print("[WAIT] Game start not confirmed yet. Play manually; tracker is read-only.")
                 last_wait_message = time.monotonic()
 
