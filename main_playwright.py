@@ -20,6 +20,7 @@ import chess
 import chess.engine
 
 from gm_book import GMBook
+from chrome_cdp import resolve_chrome_cdp_endpoint
 
 # Playwright browser adapter. This version targets a browser-based computer game,
 # not the Android/scrcpy window. The original chess/Stockfish logic below is kept.
@@ -27,7 +28,7 @@ BROWSER_PAGE = None
 BROWSER_CONTEXT = None
 BROWSER_HANDLE = 1  # sentinel used only by the legacy function signatures
 BROWSER_URL = os.environ.get("CHESS_BOT_URL", "https://www.chess.com/play/computer")
-BROWSER_CDP_ENDPOINT = os.environ.get("CHROME_CDP_ENDPOINT", "http://127.0.0.1:9222")
+BROWSER_CDP_ENDPOINT = resolve_chrome_cdp_endpoint()
 
 
 @contextmanager
