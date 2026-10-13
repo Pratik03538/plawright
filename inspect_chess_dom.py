@@ -190,13 +190,34 @@ def main() -> None:
                 parts = urlsplit(url)
                 return f"{parts.scheme}://{parts.netloc}{parts.path}"
 
+            ad_domains = (
+                "doubleclick.net",
+                "googlesyndication.com",
+                "btloader.com",
+                "amazon-adsystem.com",
+                "adnxs.com",
+                "adsrvr.org",
+                "criteo.com",
+                "pubmatic.com",
+                "openx.net",
+                "rubiconproject.com",
+            )
+
             def on_request_failed(request) -> None:
-                if net_counts["failed"] >= 25:
+                parts = urlsplit(request.url)
+                host = (parts.hostname or "").lower()
+                failure = request.failure or "no failure detail"
+
+                # Keep noisy ad requests from hiding failures in site/game assets.
+                if any(host == domain or host.endswith("." + domain) for domain in ad_domains):
+                    return
+                if net_counts["failed"] >= 60:
                     return
                 net_counts["failed"] += 1
+                resource_type = request.resource_type
                 print(
-                    f"[NET FAIL] {request.method} {safe_url(request.url)} "
-                    f"| {request.failure or 'no failure detail'}"
+                    f"[NET FAIL] {resource_type} {request.method} {safe_url(request.url)} "
+                    f"| {failure}"
                 )
 
             def on_response(response) -> None:
@@ -220,7 +241,13 @@ def main() -> None:
             page.on("requestfailed", on_request_failed)
             page.on("response", on_response)
             page.on("websocket", on_websocket)
-            page.on("console", lambda msg: print(f"[CONSOLE {msg.type.upper()}] {msg.text[:500]}") if msg.type == "error" else None)
+            page.on(
+                "console",
+                lambda msg: print(
+                    f"[CONSOLE {msg.type.upper()}] {msg.text[:500]} "
+                    f"| source={safe_url(msg.location.get('url', '')) if msg.location.get('url') else '(unknown)'}"
+                ) if msg.type == "error" else None,
+            )
             page.on("pageerror", lambda exc: print(f"[PAGE ERROR] {str(exc)[:800]}"))
             page.on("crash", lambda _: print("[ERROR] Chromium renderer crashed. Restart the inspector and try again."))
             page.on("close", lambda _: print("[WARN] Browser page was closed."))
