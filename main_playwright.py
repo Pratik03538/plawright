@@ -6,8 +6,10 @@ import ctypes
 from contextlib import contextmanager
 
 try:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
 except ImportError:  # give a useful install message when launched without the dependency
+    PlaywrightTimeoutError = TimeoutError
     sync_playwright = None
 import os
 import time
@@ -57,9 +59,34 @@ def playwright_browser_session():
             BROWSER_PAGE = page
             page.set_default_timeout(5000)
             if not page.url.startswith(BROWSER_URL):
-                page.goto(BROWSER_URL, wait_until="domcontentloaded", timeout=60000)
+                # A slow/blocked DOMContentLoaded should not abort the whole tracker.
+                # First wait for the initial document commit, then give the page a
+                # bounded window to finish DOM parsing.
+                try:
+                    page.goto(BROWSER_URL, wait_until="commit", timeout=30000)
+                except PlaywrightTimeoutError as exc:
+                    print(
+                        "[WARN] Browser navigation did not reach document commit "
+                        f"within 30 seconds: {exc}"
+                    )
+                    print(
+                        "[WARN] The browser will remain open. If it is blank, "
+                        "navigate to the computer-test page manually."
+                    )
+
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=15000)
+            except PlaywrightTimeoutError:
+                print(
+                    "[WARN] DOMContentLoaded did not fire within 15 seconds; "
+                    "continuing with the current browser page."
+                )
+
             print("[PLAYWRIGHT] Chromium opened:", page.url)
-            print("[PLAYWRIGHT] Sign in if required, start a game versus the computer, then press R in the tracker.")
+            print(
+                "[PLAYWRIGHT] Sign in if required, start a game versus the computer, "
+                "then press R in the tracker."
+            )
             yield object()  # placeholder for existing capture_screen(sct, hwnd) signatures
         finally:
             BROWSER_PAGE = None
