@@ -6,11 +6,6 @@ bounded DOM queries so large pages are not exhaustively traversed.
 from __future__ import annotations
 
 import os
-import shutil
-import socket
-import subprocess
-import time
-from pathlib import Path
 from urllib.parse import urlsplit
 
 from playwright.sync_api import Error as PlaywrightError
@@ -175,86 +170,49 @@ INSTALL_WATCHER_JS = r"""() => {
 }"""
 
 
-def find_chrome_executable() -> str:
-    candidates = [
-        Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "Google/Chrome/Application/chrome.exe",
-        Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")) / "Google/Chrome/Application/chrome.exe",
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe",
-    ]
-    found = shutil.which("chrome.exe")
-    if found:
-        candidates.insert(0, Path(found))
-    for candidate in candidates:
-        if str(candidate) and candidate.is_file():
-            return str(candidate)
-    raise SystemExit(
-        "[ERROR] Google Chrome executable not found. Install Chrome or set its path in inspect_chess_dom.py."
-    )
-
-
-def get_free_local_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
 def main() -> None:
-    chrome_process = None
-    browser = None
     with sync_playwright() as playwright:
         try:
-            chrome_exe = find_chrome_executable()
-            PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-            port = get_free_local_port()
-            endpoint = f"http://127.0.0.1:{port}"
+            browser = playwright.chromium.connect_over_cdp(CDP_ENDPOINT, timeout=10000)
+        except PlaywrightError as exc:
+            raise SystemExit(
+                f"[ERROR] Cannot attach to your existing Chrome at {CDP_ENDPOINT}: {exc}\n"
+                "In that same Chrome window, open chrome://inspect/#remote-debugging, "
+                "enable 'Allow remote debugging for this browser instance', approve the prompt, "
+                "then rerun this script. Keep the existing Chrome window open."
+            ) from exc
 
-            # Start the installed Chrome executable directly with only the
-            # dedicated profile, remote-debug port and initial URL. This avoids
-            # Playwright's normal browser-launch flags while retaining DOM inspection.
-            command = [
-                chrome_exe,
-                f"--remote-debugging-port={port}",
-                f"--user-data-dir={PROFILE_DIR}",
-                "--start-maximized",
-                "--no-first-run",
-                TARGET_URL,
-            ]
-            chrome_process = subprocess.Popen(
-                command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            print("[DOM INSPECTOR] Started normal Chrome directly (not Playwright-launched).")
-            print(f"[DOM INSPECTOR] Chrome profile: {PROFILE_DIR}")
-            print("[DOM INSPECTOR] No --no-sandbox or --disable-extensions flag is added.")
-
-            last_connect_error = None
-            deadline = time.monotonic() + 30
-            while time.monotonic() < deadline:
-                if chrome_process.poll() is not None:
-                    raise SystemExit(
-                        f"[ERROR] Chrome exited during startup with code {chrome_process.returncode}."
-                    )
-                try:
-                    browser = playwright.chromium.connect_over_cdp(endpoint, timeout=3000)
-                    break
-                except PlaywrightError as exc:
-                    last_connect_error = exc
-                    time.sleep(0.4)
-
-            if browser is None:
-                raise SystemExit(f"[ERROR] Could not attach to Chrome over CDP: {last_connect_error}")
-
+        try:
             contexts = browser.contexts
             if not contexts:
-                raise SystemExit("[ERROR] Chrome connected, but no browser context was available.")
+                raise SystemExit("[ERROR] Chrome CDP connected but no browser context was found.")
             context = contexts[0]
-            page = context.pages[0] if context.pages else context.new_page()
-            page.set_default_timeout(10000)
-            print(f"[DOM INSPECTOR] Attached to Chrome over CDP: {page.url}")
+            pages = context.pages
 
-            # Diagnostic-only network logging: redact query strings/fragments so
-            # session tokens and other URL parameters are not printed.
+            # Prefer the existing Chess.com Computer tab; do not navigate the ChatGPT tab.
+            page = next(
+                (
+                    candidate for candidate in reversed(pages)
+                    if (urlsplit(candidate.url).hostname or "").endswith("chess.com")
+                    and "/play/computer" in candidate.url
+                ),
+                None,
+            )
+            if page is None:
+                page = context.new_page()
+                print("[DOM INSPECTOR] No Computer tab found; opened a new tab in the same Chrome window.")
+                try:
+                    page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=45000)
+                except PlaywrightTimeoutError as exc:
+                    print(f"[WARN] Initial navigation timed out: {exc}")
+                    if page.is_closed():
+                        raise SystemExit("[ERROR] The new Chess.com tab closed during navigation.") from exc
+
+            page.set_default_timeout(10000)
+            print("[DOM INSPECTOR] Attached to existing Chrome; browser will remain open when the inspector exits.")
+            print("[DOM INSPECTOR] Target tab:", page.url)
+
+            # Diagnostic-only network logging: redact query strings/fragments.
             net_counts = {"failed": 0, "http_error": 0}
             ad_domains = (
                 "doubleclick.net",
@@ -310,26 +268,16 @@ def main() -> None:
             )
             page.on("pageerror", lambda exc: print(f"[PAGE ERROR] {str(exc)[:800]}"))
             page.on("crash", lambda _: print("[ERROR] Chrome renderer crashed."))
-            page.on("close", lambda _: print("[WARN] Browser page was closed."))
+            page.on("close", lambda _: print("[WARN] Chess.com page was closed."))
 
-            if not page.url.startswith(TARGET_URL):
-                try:
-                    page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=45000)
-                except PlaywrightTimeoutError as exc:
-                    print(f"[WARN] Navigation timed out: {exc}")
-                    if page.is_closed():
-                        print("[ERROR] Page closed during navigation. Run the inspector again.")
-                        return
-
-            print("\\n[DOM INSPECTOR] Browser open:", page.url)
-            print("[DOM INSPECTOR] Start/select a Computer bot and wait for the board / any engine error.")
-            input("[DOM INSPECTOR] Once the board or error is visible, return here and press ENTER... ")
+            print("\n[DOM INSPECTOR] Switch to the Chess.com tab and select the computer bot.")
+            input("[DOM INSPECTOR] When the board or engine error is visible, return here and press ENTER... ")
 
             snapshot = None
             last_snapshot_error = None
             for attempt in range(1, 5):
-                if page.is_closed() or not browser.contexts:
-                    print("[ERROR] Browser page closed before DOM inspection.")
+                if page.is_closed():
+                    print("[ERROR] Chess.com tab was closed before DOM inspection.")
                     return
                 try:
                     page.wait_for_load_state("domcontentloaded", timeout=12000)
@@ -350,10 +298,10 @@ def main() -> None:
 
             if snapshot is None:
                 print(f"[ERROR] Could not inspect DOM after navigation retries: {last_snapshot_error}")
-                print("[HINT] Keep Chrome open and rerun the inspector after the page settles.")
+                print("[HINT] Keep the same Chrome window open and rerun after the bot page settles.")
                 return
 
-            print("\\n[DOM SNAPSHOT]")
+            print("\n[DOM SNAPSHOT]")
             print(f"URL: {snapshot.get('url')}")
             print(f"Title: {snapshot.get('title')}")
             print(f"Ready state: {snapshot.get('readyState')}")
@@ -374,31 +322,24 @@ def main() -> None:
 
             page.expose_binding(
                 "__reportDomDiagnostic",
-                lambda source, records: print(f"\\n[DOM CHANGE] {records}"),
+                lambda source, records: print(f"\n[DOM CHANGE] {records}"),
             )
             watcher = page.evaluate(INSTALL_WATCHER_JS)
-            print(f"\\n[DOM INSPECTOR] MutationObserver installed: {watcher.get('installedObservers')} root(s).")
-            print("[DOM INSPECTOR] Make one move on the test board. Check whether board/piece/move-list changes are reported.")
-            print("[DOM INSPECTOR] Press Ctrl+C here to stop.")
+            print(f"\n[DOM INSPECTOR] MutationObserver installed: {watcher.get('installedObservers')} root(s).")
+            print("[DOM INSPECTOR] Make one move if the computer game has started. Watch terminal for DOM changes.")
+            print("[DOM INSPECTOR] Press Ctrl+C here to stop. The existing Chrome window is not closed.")
             try:
                 page.wait_for_event("close", timeout=0)
             except KeyboardInterrupt:
                 pass
         except KeyboardInterrupt:
-            print("\\n[DOM INSPECTOR] Stopped by user.")
+            print("\n[DOM INSPECTOR] Stopped by user.")
         except PlaywrightError as exc:
             print(f"[ERROR] Playwright failure: {exc}")
         finally:
-            # Close the Chrome we spawned, without touching the user's everyday Chrome.
-            if chrome_process is not None and chrome_process.poll() is None:
-                try:
-                    chrome_process.terminate()
-                    chrome_process.wait(timeout=5)
-                except Exception:
-                    try:
-                        chrome_process.kill()
-                    except Exception:
-                        pass
+            # Do not close this CDP-attached browser/context: it belongs to the user.
+            # Exiting the Playwright client disconnects while leaving Chrome tabs open.
+
 
 
 if __name__ == "__main__":
