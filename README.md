@@ -10,7 +10,7 @@ This build can attach to the already-open Chrome instance so Chess.com loads wit
 
 1. In the Chrome window that already has ChatGPT and Chess.com open, enter `chrome://inspect/#remote-debugging`.
 2. Enable **Allow remote debugging for this browser instance** and approve Chrome's confirmation prompt.
-3. Confirm Chrome shows a local debugging endpoint, normally `127.0.0.1:9222`. Keep Chrome open.
+3. Keep Chrome open. This build reads Chrome's `DevToolsActivePort` file and constructs the full WebSocket endpoint automatically. In this permission-gated mode, `/json/version` may return 404 even though the WebSocket endpoint works.
 
 Only enable remote debugging on your own trusted machine. It gives the local automation process control of open browser tabs.
 
@@ -22,7 +22,7 @@ python -m py_compile .\inspect_chess_dom.py
 python .\inspect_chess_dom.py
 ```
 
-The inspector attaches to the existing Chrome and selects a tab whose URL contains `chess.com/play/computer`. If the endpoint uses another port, set `$env:CHROME_CDP_ENDPOINT = "http://127.0.0.1:PORT"` before running.
+The checker, inspector, and bot resolve Chrome's WebSocket endpoint from `DevToolsActivePort` automatically. If using another Chrome user-data directory, set `$env:CHROME_DEVTOOLS_ACTIVE_PORT_FILE = "C:\\path\\to\\User Data\\DevToolsActivePort"` before running. A full WebSocket endpoint can also be supplied with `$env:CHROME_CDP_ENDPOINT`.
 
 ### Run the current browser bot
 
