@@ -362,8 +362,9 @@ SNAPSHOT_JS = r"""return (() => {
 CSV_FIELDS = [
     "event", "game_id", "game_url", "game_started_at", "ply", "side", "move",
     "time_taken_seconds_estimate", "move_time_seconds_dom", "time_source",
-    "move_observed_at", "clock_1", "clock_2", "white_clock", "black_clock",
-    "your_clock", "opponent_clock", "side_to_move", "white_player", "black_player",
+    "move_observed_at", "clock_1", "clock_2", "top_clock", "bottom_clock",
+    "white_clock", "black_clock", "your_clock", "opponent_clock", "side_to_move",
+    "white_player", "black_player",
     "move_count", "last_move", "game_status", "board_orientation", "board_size",
     "board_pieces_json", "highlighted_squares_json", "note"
 ]
@@ -532,7 +533,11 @@ def get_clocks(snapshot: dict) -> tuple[str, str]:
 
 def get_clock_details(snapshot: dict) -> dict[str, str]:
     values = snapshot.get("clocks", [])
-    result = {"clock_1": "", "clock_2": "", "white_clock": "", "black_clock": ""}
+    result = {
+        "clock_1": "", "clock_2": "",
+        "top_clock": "", "bottom_clock": "",
+        "white_clock": "", "black_clock": ""
+    }
     ordered = []
     for item in values:
         value = str(item.get("value", "")).strip()
@@ -540,17 +545,19 @@ def get_clock_details(snapshot: dict) -> dict[str, str]:
             continue
         ordered.append(value)
         side = str(item.get("side", "")).strip().lower()
+        context = str(item.get("context", "")).lower()
+        if "clock-top" in context or "player-top" in context:
+            result["top_clock"] = value
+        elif "clock-bottom" in context or "player-bottom" in context:
+            result["bottom_clock"] = value
         if side == "white" and not result["white_clock"]:
             result["white_clock"] = value
         elif side == "black" and not result["black_clock"]:
             result["black_clock"] = value
+
     result["clock_1"] = ordered[0] if ordered else ""
     result["clock_2"] = ordered[1] if len(ordered) > 1 else ""
-    # Order-only clocks are intentionally not guessed to be White/Black.
-    if not result["white_clock"] and len(ordered) == 1 and values[0].get("side", "") == "White":
-        result["white_clock"] = ordered[0]
     return result
-
 
 def get_turn(snapshot: dict, moves: list[str]) -> str:
     explicit = str(snapshot.get("domTurn", "")).strip()
@@ -648,12 +655,15 @@ def clock_context(snapshot: dict, moves: list[str]) -> dict[str, str]:
     clocks = get_clock_details(snapshot)
     players = get_player_details(snapshot)
     turn = get_turn(snapshot, moves)
-    your_clock = ""
-    opponent_clock = ""
-    if players["your_side"] == "White":
-        your_clock, opponent_clock = clocks["white_clock"], clocks["black_clock"]
-    elif players["your_side"] == "Black":
-        your_clock, opponent_clock = clocks["black_clock"], clocks["white_clock"]
+    # For this layout the opponent is at the top and the local player is at the bottom.
+    your_clock = clocks["bottom_clock"]
+    opponent_clock = clocks["top_clock"]
+    if not players["your_side"]:
+        for item in snapshot.get("clocks", []):
+            context = str(item.get("context", "")).lower()
+            if ("clock-bottom" in context or "player-bottom" in context) and item.get("side") in ("White", "Black"):
+                players["your_side"] = str(item.get("side"))
+                break
     return {
         **clocks,
         "your_clock": your_clock,
@@ -662,7 +672,6 @@ def clock_context(snapshot: dict, moves: list[str]) -> dict[str, str]:
         "white_player": players["white_player"],
         "black_player": players["black_player"],
     }
-
 
 def board_json(snapshot: dict, key: str) -> str:
     try:
@@ -875,7 +884,7 @@ def main() -> None:
                 })
                 ctx = event_context(snapshot, moves)
                 print(f"[GAME DETECTED] {url} | existing moves: {len(moves)}")
-                print(f"[BOARD] {ctx['white_player'] or 'White?'} ({ctx['white_clock'] or 'clock unknown'}) vs {ctx['black_player'] or 'Black?'} ({ctx['black_clock'] or 'clock unknown'}) | turn {ctx['side_to_move'] or 'unknown'} | pieces {len(snapshot.get('boardPieces', []))}")
+                print(f"[BOARD] You-bottom {ctx['your_clock'] or '?'} | Opponent-top {ctx['opponent_clock'] or '?'} | White {ctx['white_clock'] or '?'} / Black {ctx['black_clock'] or '?'} | turn {ctx['side_to_move'] or 'unknown'} | pieces {len(snapshot.get('boardPieces', []))}")
                 print(f"[DOM] direct move nodes: {len(snapshot.get('directMoves', []))} via {snapshot.get('directMoveSelector') or 'fallback'} | explicit move-time values: {len(snapshot.get('moveTimes', []))} | highlighted squares: {len(snapshot.get('highlightedSquares', []))}")
                 for index, move in enumerate(moves, start=1):
                     append_csv({
