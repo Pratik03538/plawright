@@ -132,29 +132,58 @@ def main() -> None:
             ) from exc
 
         try:
-            pages = [
-                page
-                for context in browser.contexts
-                for page in context.pages
-            ]
-            page = next(
-                (
-                    p for p in reversed(pages)
-                    if (urlsplit(p.url).hostname or "").endswith("chess.com")
-                    and "/play/computer" in p.url
-                ),
-                None,
-            )
+            def find_computer_page():
+                # Refresh the tab list each time because the bot picker can navigate
+                # from /play/computer to /play/computer/<bot> while the checker runs.
+                pages_now = [
+                    p
+                    for context_now in browser.contexts
+                    for p in context_now.pages
+                ]
+                return next(
+                    (
+                        p for p in reversed(pages_now)
+                        if not p.is_closed()
+                        and (urlsplit(p.url).hostname or "").endswith("chess.com")
+                        and "/play/computer" in p.url
+                    ),
+                    None,
+                )
+
+            page = find_computer_page()
             if page is None:
                 print("[CHECK] No existing Chess.com Computer tab was found.")
                 print("[CHECK] Open the Computer tab in the same Chrome instance, then rerun.")
                 return
 
-            try:
-                snapshot = page.evaluate(SNAPSHOT_JS)
-            except PlaywrightError as exc:
-                print(f"[CHECK] Page was navigating while reading state: {exc}")
-                print("[CHECK] Wait for the spinner/message to settle, then run this checker again.")
+            snapshot = None
+            last_error = None
+            for attempt in range(1, 9):
+                page = find_computer_page()
+                if page is None:
+                    print("[CHECK] Computer tab is navigating or closed; waiting for it to return.")
+                else:
+                    try:
+                        # Waiting for DOMContentLoaded handles document navigation;
+                        # a short retry handles fast single-page app transitions.
+                        try:
+                            page.wait_for_load_state("domcontentloaded", timeout=2500)
+                        except Exception:
+                            pass
+                        snapshot = page.evaluate(SNAPSHOT_JS)
+                        break
+                    except PlaywrightError as exc:
+                        last_error = exc
+                        print(f"[CHECK] Snapshot attempt {attempt}/8 interrupted by navigation.")
+                if attempt < 8:
+                    # This timer is only a bounded retry for navigation races, not
+                    # a polling loop for game moves. The command exits after one snapshot.
+                    import time
+                    time.sleep(0.6)
+
+            if snapshot is None:
+                print(f"[CHECK] Could not get a stable snapshot after retries: {last_error}")
+                print("[CHECK] Keep the Computer tab open, wait for its URL/loading to settle, then rerun.")
                 return
 
             print("\n========== CHESS.COM GAME STATE CHECK ==========")
