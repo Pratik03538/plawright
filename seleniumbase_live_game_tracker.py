@@ -534,15 +534,16 @@ def get_player_details(snapshot: dict) -> dict[str, str]:
     result = {"white_player": "", "black_player": "", "your_side": ""}
     for player in players:
         name = str(player.get("name") or player.get("username") or "").strip()
+        username = str(player.get("username") or "").strip().casefold()
         side = str(player.get("side", "")).strip()
         if side == "White" and name and not result["white_player"]:
             result["white_player"] = name
         elif side == "Black" and name and not result["black_player"]:
             result["black_player"] = name
-        if player.get("isYou") and side in ("White", "Black"):
+        username_matches = bool(CHESSCOM_USERNAME and username == CHESSCOM_USERNAME)
+        if side in ("White", "Black") and (player.get("isYou") or username_matches):
             result["your_side"] = side
     return result
-
 
 def move_times_by_ply(snapshot: dict, total_moves: int) -> dict[int, float]:
     """Read only explicit time annotations tied to a data-ply node."""
