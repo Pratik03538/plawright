@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Chess.com Move & Time Recorder",
+  "version": "1.0.0",
+  "description": "Read-only tracker for game start, moves and approximate time between moves on Chess.com.",
+  "permissions": [
+    "storage",
+    "downloads"
+  ],
+  "host_permissions": [
+    "https://www.chess.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.chess.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
