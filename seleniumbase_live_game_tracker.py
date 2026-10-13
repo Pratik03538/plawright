@@ -1,4 +1,4 @@
-"""Read-only Chess.com live move/time recorder using SeleniumBase's standard Chrome mode.
+"""Read-only live move/time recorder using SeleniumBase's standard Chrome mode.
 
 SeleniumBase launches a normal browser window with a dedicated persistent profile.
 This script reads visible DOM data only: it never clicks, starts games, sends moves,
@@ -37,11 +37,37 @@ except ImportError as exc:
     ) from exc
 
 BASE_DIR = Path(__file__).resolve().parent
+SETTINGS_FILE = BASE_DIR / "tracker_settings.txt"
+
+
+def load_settings() -> dict[str, str]:
+    settings = {"site_name": "Game Site", "site_domain": "example.com"}
+    try:
+        lines = SETTINGS_FILE.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        raise SystemExit(f"Settings file missing: {SETTINGS_FILE}")
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        settings[key.strip().lower()] = value.strip()
+    domain = re.sub(r"^https?://", "", settings.get("site_domain", "").strip().lower()).split("/", 1)[0]
+    if not domain or any(ch.isspace() for ch in domain):
+        raise SystemExit(f"Invalid site_domain in {SETTINGS_FILE}")
+    settings["site_domain"] = domain.removeprefix("www.")
+    settings["site_name"] = settings.get("site_name", "Game Site").strip() or "Game Site"
+    return settings
+
+
+SITE_SETTINGS = load_settings()
+SITE_NAME = SITE_SETTINGS["site_name"]
+SITE_DOMAIN = SITE_SETTINGS["site_domain"]
 PROFILE_DIR = BASE_DIR / ".normal_chrome_profile"
 PORT_FILE = PROFILE_DIR / "DevToolsActivePort"
-LOG_FILE = BASE_DIR / "chesscom_live_moves_seleniumbase.csv"
+LOG_FILE = BASE_DIR / "live_moves.csv"
 POLL_SECONDS = 0.35
-CHESSCOM_USERNAME = os.environ.get("CHESSCOM_USERNAME", "").strip().casefold()
+TRACKER_USERNAME = os.environ.get("TRACKER_USERNAME", "").strip().casefold()
 
 CHROME_CANDIDATES = [
     Path(os.environ.get("PROGRAMFILES", r"C:\Program Files"))
@@ -451,18 +477,18 @@ def append_csv(row: dict) -> None:
         writer.writerow({key: row.get(key, "") for key in CSV_FIELDS})
 
 
-def is_chess_page(url: str) -> bool:
-    """Only accept a real game URL, not Chess.com lobby/home pages with a demo board."""
+def is_target_game_page(url: str) -> bool:
+    """Accept game URLs only for the domain set in the external text file."""
     try:
         parsed = urlsplit(url)
         path = parsed.path.rstrip("/")
+        hostname = (parsed.hostname or "").lower()
         return (
-            (parsed.hostname or "").lower().endswith("chess.com")
+            (hostname == SITE_DOMAIN or hostname.endswith("." + SITE_DOMAIN))
             and re.fullmatch(r"/game/(?:live/)?\d+", path) is not None
         )
     except Exception:
         return False
-
 
 def _candidate_tokens(text: str) -> list[str]:
     cleaned = str(text or "").translate(FIGURINE_MAP)
@@ -593,7 +619,7 @@ def get_player_details(snapshot: dict) -> dict[str, str]:
             result["white_player"] = name
         elif side == "Black" and name and not result["black_player"]:
             result["black_player"] = name
-        username_matches = bool(CHESSCOM_USERNAME and username == CHESSCOM_USERNAME)
+        username_matches = bool(TRACKER_USERNAME and username == TRACKER_USERNAME)
         if side in ("White", "Black") and (player.get("isYou") or username_matches):
             result["your_side"] = side
 
@@ -729,9 +755,9 @@ def num_clock(value: str) -> float | None:
 
 
 def run_automated_dom_test(driver, test_url: str, timeout_seconds: int = 30) -> bool:
-    """Open a completed Chess.com game page and test its visible DOM without playing."""
-    if not is_chess_page(test_url):
-        print("[TEST] URL must be a Chess.com game URL, e.g. https://www.chess.com/game/123456789")
+    """Open a completed game page and test its visible DOM without playing."""
+    if not is_target_game_page(test_url):
+        print(f"[TEST] URL must be a {SITE_NAME} game URL, e.g. https://www.{SITE_DOMAIN}/game/123456789")
         return False
 
     print("[TEST] Opening completed game page...")
@@ -792,18 +818,18 @@ def run_automated_dom_test(driver, test_url: str, timeout_seconds: int = 30) -> 
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Read-only Chess.com move tracker")
-    parser.add_argument("--test-url", help="Open a completed Chess.com game page and automatically test DOM extraction")
+    parser = argparse.ArgumentParser(description=f"Read-only {SITE_NAME} move tracker")
+    parser.add_argument("--test-url", help="Open a completed game page and automatically test DOM extraction")
     parser.add_argument("--test-timeout", type=int, default=30, help="Seconds to wait in automated test mode (default: 30)")
     args = parser.parse_args()
 
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     if args.test_url:
-        print("[START] Read-only Chess.com DOM test.")
+        print(f"[START] Read-only {SITE_NAME} DOM test.")
     else:
-        print("[START] Read-only Chess.com tracker.")
+        print(f"[START] Read-only {SITE_NAME} tracker.")
         print("[CSV]", LOG_FILE)
-        print("[WAIT] Open a Chess.com game in the Chrome window. Stop with Ctrl+C.")
+        print(f"[WAIT] Open a {SITE_NAME} game in the browser window. Stop with Ctrl+C.")
 
     try:
         driver = Driver(
@@ -850,12 +876,12 @@ def main() -> None:
                 print("[WARN] Chrome session disconnected.")
                 break
 
-            # Inspect only open Chess.com tabs. No navigation is performed.
+            # Inspect only open matching game tabs. No navigation is performed.
             for handle in reversed(handles):
                 try:
                     driver.switch_to.window(handle)
                     candidate_url = driver.current_url
-                    if not is_chess_page(candidate_url):
+                    if not is_target_game_page(candidate_url):
                         continue
                     candidate = driver.execute_script(SNAPSHOT_JS)
                     if candidate.get("boardVisible") or candidate.get("clocks") or candidate.get("moveTexts"):
@@ -866,7 +892,7 @@ def main() -> None:
 
             if snapshot is None:
                 if time.monotonic() - last_wait_message > 30:
-                    print("[WAIT] Chess.com game DOM ka wait. Chrome mein game manually open/start karo.")
+                    print(f"[WAIT] {SITE_NAME} game DOM ka wait. Game manually open/start karo.")
                     last_wait_message = time.monotonic()
                 time.sleep(POLL_SECONDS)
                 continue
@@ -915,7 +941,7 @@ def main() -> None:
                 append_csv({
                     "event": "GAME_ENDED", "game_id": active_game["id"], "game_url": active_game["url"],
                     "game_started_at": active_game["started_at"], "move_observed_at": now,
-                    "note": "Chess.com URL changed"
+                    "note": "Game URL changed"
                 })
                 completed_game_urls.add(active_game["url"])
                 print("[GAME END] Page changed.")
@@ -925,7 +951,7 @@ def main() -> None:
             last_url = url
             parsed = urlsplit(url)
             # A board on /play/online or another lobby is only a preview.
-            # Since is_chess_page() accepts only /game/{id}, this is an actual game page.
+            # Since is_target_game_page() accepts only /game/{id}, this is an actual game page.
             start_candidate = (
                 url not in completed_game_urls
                 and bool(re.fullmatch(r"/game/(?:live/)?\d+", parsed.path.rstrip("/")))
@@ -962,7 +988,7 @@ def main() -> None:
 
             if active_game is None and start_candidate:
                 active_game = {
-                    "id": "chesscom-" + datetime.now().strftime("%Y%m%d-%H%M%S"),
+                    "id": "live-" + datetime.now().strftime("%Y%m%d-%H%M%S"),
                     "url": url, "started_at": now
                 }
                 last_moves = moves[:]
@@ -997,7 +1023,7 @@ def main() -> None:
                         side = "White" if ply % 2 else "Black"
                         dom_seconds = dom_move_times.get(ply)
                         ctx = event_context(snapshot, moves)
-                        time_source = "Chess.com DOM annotation" if dom_seconds is not None else "poll-interval estimate"
+                        time_source = "DOM annotation" if dom_seconds is not None else "poll-interval estimate"
                         append_csv({
                             "event": "MOVE", "game_id": active_game["id"], "game_url": active_game["url"],
                             "game_started_at": active_game["started_at"], "ply": ply, "side": side,
@@ -1021,7 +1047,7 @@ def main() -> None:
                                 "game_started_at": active_game["started_at"], "ply": ply,
                                 "side": "White" if ply % 2 else "Black", "move": move,
                                 "move_time_seconds_dom": "" if dom_seconds is None else dom_seconds,
-                                "time_source": "Chess.com DOM annotation" if dom_seconds is not None else "unknown (multiple moves between polls)",
+                                "time_source": "DOM annotation" if dom_seconds is not None else "unknown (multiple moves between polls)",
                                 "move_observed_at": now, **ctx,
                                 "note": "Explicit DOM duration available" if dom_seconds is not None else "Multiple moves arrived between polls; individual duration unavailable"
                             })
