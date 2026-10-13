@@ -228,10 +228,13 @@ def append_csv(row: dict) -> None:
 
 
 def is_chess_page(url: str) -> bool:
+    """Only accept a real game URL, not Chess.com lobby/home pages with a demo board."""
     try:
         parsed = urlsplit(url)
-        return (parsed.hostname or "").lower().endswith("chess.com") and (
-            parsed.path.startswith("/play") or parsed.path.startswith("/game/")
+        path = parsed.path.rstrip("/")
+        return (
+            (parsed.hostname or "").lower().endswith("chess.com")
+            and re.fullmatch(r"/game/(?:live/)?\d+", path) is not None
         )
     except Exception:
         return False
@@ -350,9 +353,16 @@ def main() -> None:
 
             last_url = url
             parsed = urlsplit(url)
+            # A board on /play/online or another lobby is only a preview.
+            # Since is_chess_page() accepts only /game/{id}, this is an actual game page.
             start_candidate = (
-                snapshot.get("boardVisible")
-                and (snapshot.get("activeControls") or ticked or bool(moves))
+                bool(re.fullmatch(r"/game/(?:live/)?\d+", parsed.path.rstrip("/")))
+                and snapshot.get("boardVisible")
+                and (
+                    snapshot.get("activeControls")
+                    or ticked
+                    or (bool(moves) and len(snapshot.get("clocks", [])) >= 2)
+                )
                 and not snapshot.get("resultVisible")
             )
 
