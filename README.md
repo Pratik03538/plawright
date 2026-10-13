@@ -35,7 +35,7 @@ git show origin/main:seleniumbase_live_game_tracker.py | Set-Content -Encoding u
 .\venv\Scripts\python.exe .\seleniumbase_live_game_tracker.py
 ```
 
-In the new Chrome window, navigate to Chess.com and start the game manually. The tracker appends events to `chesscom_live_moves_seleniumbase.csv`. Press Ctrl+C to stop. Per-move time is an estimate based on the time between visible move-list updates; moves already on screen when the tracker starts have no recoverable move time.
+In the new Chrome window, navigate to Chess.com and start the game manually. Detection ignores lobby/home URLs such as `/play/online` and only accepts real game routes like `/game/185253866682` after it sees board + active-game signals. The tracker appends events to `chesscom_live_moves_seleniumbase.csv`. Press Ctrl+C to stop. Per-move time is an estimate based on the time between visible move-list updates; moves already on screen when the tracker starts have no recoverable move time.
 
 ## Selenium live game and move-time tracker (read-only)
 
