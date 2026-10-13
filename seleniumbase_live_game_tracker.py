@@ -8,6 +8,7 @@ Reads rendered DOM for individual moves, visible time annotations, clocks, playe
 """
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import os
@@ -332,15 +333,27 @@ SNAPSHOT_JS = r"""return (() => {
       activeRe.test(norm([el.innerText || '',el.getAttribute('aria-label') || '',el.getAttribute('title') || ''].join(' ')))
     );
   } catch (_) {}
-  const resultRe = /\b(checkmate|stalemate|game over|you won|you lost|white wins|black wins|won on time|resignation|resigned|draw by|drawn game|game aborted)\b/i;
+  const resultRe = /\b(checkmate|stalemate|game over|you won|you lost|white wins|black wins|white won|black won|won on time|resignation|resigned|draw by|drawn game|game aborted|game drawn|timeout|time out|1-0|0-1|1\/2-1\/2)\b/i;
   let resultVisible = false, resultText = '';
-  for (const sel of ['[class*="game-over"]','[class*="game-result"]','[data-cy*="game-result"]','[data-cy*="game-over"]']) {
-    try {
-      const el = Array.from(document.querySelectorAll(sel)).find(el => visible(el) && resultRe.test(el.innerText || el.textContent || ''));
-      if (el) { resultVisible = true; resultText = norm(el.innerText || el.textContent).slice(0, 250); break; }
-    } catch (_) {}
+  const resultSelectors = ['[class*="game-over"]','[class*="game-result"]','[data-cy*="game-result"]','[data-cy*="game-over"]'];
+  for (const root of roots) {
+    for (const sel of resultSelectors) {
+      try {
+        const el = Array.from(root.querySelectorAll(sel)).find(el => visible(el) && resultRe.test(el.innerText || el.textContent || ''));
+        if (el) { resultVisible = true; resultText = norm(el.innerText || el.textContent).slice(0, 250); break; }
+      } catch (_) {}
+    }
+    if (resultVisible) break;
   }
-  const statusText = norm(document.body?.innerText || '').slice(0, 2500);
+  const pageText = norm(document.body?.innerText || '');
+  if (!resultVisible) {
+    const resultLine = pageText.split(/\n+/).map(norm).find(line =>
+      line.length <= 180 && resultRe.test(line) &&
+      /\b(checkmate|stalemate|won on time|resignation|resigned|draw by|drawn game|game aborted|game drawn|timeout|time out|1-0|0-1|1\/2-1\/2|white won|black won|you won|you lost)\b/i.test(line)
+    );
+    if (resultLine) { resultVisible = true; resultText = resultLine.slice(0, 250); }
+  }
+  const statusText = pageText.slice(0, 2500);
   const directMoves = directGroups['[class*="notation"]'] && directGroups['[class*="notation"]'].length
     ? directGroups['[class*="notation"]']
     : (directGroups['[class*="main-line-ply"]'] || []);
@@ -714,11 +727,83 @@ def num_clock(value: str) -> float | None:
     except (TypeError, ValueError):
         return None
 
+
+def run_automated_dom_test(driver, test_url: str, timeout_seconds: int = 30) -> bool:
+    """Open a completed Chess.com game page and test its visible DOM without playing."""
+    if not is_chess_page(test_url):
+        print("[TEST] URL must be a Chess.com game URL, e.g. https://www.chess.com/game/123456789")
+        return False
+
+    print("[TEST] Opening completed game page...")
+    try:
+        driver.get(test_url)
+    except WebDriverException as exc:
+        print(f"[TEST] Navigation failed: {exc.__class__.__name__}")
+        return False
+
+    deadline = time.monotonic() + max(5, timeout_seconds)
+    last_snapshot = {}
+    last_moves = []
+    stable_signature = None
+    stable_polls = 0
+
+    while time.monotonic() < deadline:
+        try:
+            snapshot = driver.execute_script(SNAPSHOT_JS)
+        except WebDriverException:
+            print("[TEST] Browser disconnected.")
+            return False
+        if snapshot:
+            moves = parse_moves(snapshot)
+            signature = (
+                len(moves), bool(snapshot.get("resultVisible")),
+                str(snapshot.get("resultText", "")), len(snapshot.get("boardPieces", []))
+            )
+            if signature == stable_signature:
+                stable_polls += 1
+            else:
+                stable_signature = signature
+                stable_polls = 0
+            last_snapshot, last_moves = snapshot, moves
+            if snapshot.get("boardVisible") and moves and snapshot.get("resultVisible") and stable_polls >= 2:
+                break
+        time.sleep(0.5)
+
+    if not last_snapshot:
+        print("[TEST] FAIL: no readable game DOM.")
+        return False
+
+    times = move_times_by_ply(last_snapshot, len(last_moves))
+    clocks = clock_context(last_snapshot, last_moves)
+    board_ok = bool(last_snapshot.get("boardVisible"))
+    moves_ok = len(last_moves) > 0
+    result_ok = bool(last_snapshot.get("resultVisible"))
+    pieces = len(last_snapshot.get("boardPieces", []))
+    tail = " ".join(last_moves[-6:]) if last_moves else "-"
+    result_text = str(last_snapshot.get("resultText") or "not detected").replace("\n", " ").strip()[:100]
+
+    print(f"[TEST] Board={'OK' if board_ok else 'FAIL'} | moves={len(last_moves)} | pieces={pieces}")
+    print(f"[TEST] Last moves: {tail}")
+    print(f"[TEST] Result={'OK: ' + result_text if result_ok else 'NOT DETECTED'} | DOM move-times={len(times)}")
+    print(f"[TEST] Clocks: You-bottom={clocks['your_clock'] or '?'} Opponent-top={clocks['opponent_clock'] or '?'}")
+    passed = board_ok and moves_ok and result_ok
+    print("[TEST] PASS" if passed else "[TEST] PARTIAL - check result/notation selectors")
+    return passed
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Read-only Chess.com move tracker")
+    parser.add_argument("--test-url", help="Open a completed Chess.com game page and automatically test DOM extraction")
+    parser.add_argument("--test-timeout", type=int, default=30, help="Seconds to wait in automated test mode (default: 30)")
+    args = parser.parse_args()
+
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    print("[START] Read-only Chess.com tracker.")
-    print("[CSV]", LOG_FILE)
-    print("[WAIT] Open a Chess.com game in the Chrome window. Stop with Ctrl+C.")
+    if args.test_url:
+        print("[START] Read-only Chess.com DOM test.")
+    else:
+        print("[START] Read-only Chess.com tracker.")
+        print("[CSV]", LOG_FILE)
+        print("[WAIT] Open a Chess.com game in the Chrome window. Stop with Ctrl+C.")
 
     try:
         driver = Driver(
@@ -728,6 +813,15 @@ def main() -> None:
             uc=False,
         )
         driver.implicitly_wait(0)
+        if args.test_url:
+            passed = run_automated_dom_test(driver, args.test_url, args.test_timeout)
+            try:
+                driver.quit()
+            except Exception:
+                pass
+            if not passed:
+                raise SystemExit(1)
+            return
     except Exception as exc:
         raise SystemExit(
             "SeleniumBase Chrome launch nahi kar paya. Try: "
