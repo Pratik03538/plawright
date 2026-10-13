@@ -13,7 +13,10 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
+from chrome_cdp import resolve_chrome_cdp_endpoint
+
 BASE_DIR = Path(__file__).resolve().parent
+CDP_ENDPOINT = resolve_chrome_cdp_endpoint()
 # Attach to the already-open Chrome instance via its user-approved CDP endpoint.
 # This avoids Playwright's normal launch arguments when diagnosing site/game startup.
 PROFILE_DIR = BASE_DIR / "playwright_dom_clean_chrome_profile"
