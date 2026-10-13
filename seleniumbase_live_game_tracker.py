@@ -4,11 +4,12 @@ SeleniumBase launches a normal browser window with a dedicated persistent profil
 This script reads visible DOM data only: it never clicks, starts games, sends moves,
 or calls game APIs. UC/stealth mode is deliberately not enabled.
 
-Per-move time is an estimate based on the time between visible move-list updates.
+Reads rendered DOM for individual moves, visible time annotations, clocks, player labels, turn, result, and board-piece metadata. Only explicit DOM annotations are treated as move durations; poll timing is marked as an estimate.
 """
 from __future__ import annotations
 
 import csv
+import json
 import os
 import re
 import subprocess
@@ -67,11 +68,12 @@ SNAPSHOT_JS = r"""return (() => {
     const r = el.getBoundingClientRect();
     if (!r.width || !r.height) return false;
     const s = getComputedStyle(el);
-    return s.display !== 'none' && s.visibility !== 'hidden';
+    return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
   };
   const norm = s => String(s || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
   const isClock = s => /^\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?$|^\d{1,2}[.,]\d+$/.test(norm(s));
-  const roots = [document], seenRoots = new Set(roots), moveTexts = [], clockEls = new Set();
+  const roots = [document], seenRoots = new Set(roots);
+  const moveTexts = [], directGroups = {}, clockEls = new Set(), dataPlyNodes = [];
   const moveSelectors = [
     'wc-simple-move-list','wc-vertical-move-list','wc-move-list',
     '[class*="move-text-component"]','[class*="vertical-move-list"]',
@@ -82,58 +84,223 @@ SNAPSHOT_JS = r"""return (() => {
     '[data-cy="clock-time"]','.clock-time-monospace',
     '[class*="clock-component"]','wc-chess-clock','[class*="clock-time"]'
   ];
-  for (let ri = 0; ri < roots.length && ri < 14; ri++) {
+  const addShadow = el => {
+    try {
+      if (el && el.shadowRoot && !seenRoots.has(el.shadowRoot) && roots.length < 18) {
+        seenRoots.add(el.shadowRoot); roots.push(el.shadowRoot);
+      }
+    } catch (_) {}
+  };
+  for (let ri = 0; ri < roots.length && ri < 18; ri++) {
     const root = roots[ri];
+    // Broad candidates remain available for debug/fallback only.
     for (const selector of moveSelectors) {
       let nodes = [];
-      try { nodes = Array.from(root.querySelectorAll(selector)).slice(0, 30); } catch (_) {}
+      try { nodes = Array.from(root.querySelectorAll(selector)).slice(0, 100); } catch (_) {}
       for (const el of nodes) {
         if (!visible(el)) continue;
         const txt = norm(el.innerText || el.textContent);
-        if (txt && txt.length < 6000) moveTexts.push({ selector, text: txt.slice(0, 3000) });
-        if (el.shadowRoot && !seenRoots.has(el.shadowRoot) && roots.length < 14) {
-          seenRoots.add(el.shadowRoot); roots.push(el.shadowRoot);
+        if (txt && txt.length < 6000) moveTexts.push({selector, text: txt.slice(0, 3000)});
+        addShadow(el);
+      }
+    }
+    // Prefer single notation nodes. Do not let a large parent consume the candidate limit.
+    for (const selector of ['[class*="notation"]','[class*="main-line-ply"]']) {
+      let nodes = [];
+      try { nodes = Array.from(root.querySelectorAll(selector)).filter(visible); } catch (_) {}
+      const unique = nodes.filter((el, i) => nodes.indexOf(el) === i);
+      const leaves = unique.filter(el => !unique.some(other =>
+        other !== el && el.contains(other) && norm(other.innerText || other.textContent)
+      ));
+      const group = [];
+      for (const el of leaves) {
+        const txt = norm(el.innerText || el.textContent);
+        if (txt && txt.length <= 120) {
+          group.push({
+            text: txt,
+            selector,
+            className: String(el.className || '').slice(0, 140),
+            dataPly: el.getAttribute('data-ply') || ''
+          });
         }
       }
+      if (group.length) directGroups[selector] = group.slice(0, 500);
+    }
+    let plyNodes = [];
+    try { plyNodes = Array.from(root.querySelectorAll('[data-ply]')).filter(visible).slice(0, 250); } catch (_) {}
+    for (const el of plyNodes) {
+      const txt = norm(el.innerText || el.textContent);
+      const title = norm(el.getAttribute('title') || '');
+      const aria = norm(el.getAttribute('aria-label') || '');
+      const className = String(el.className || '').slice(0, 140);
+      const combined = [txt, title, aria].filter(Boolean).join(' ');
+      const match = combined.match(/(?:^|\s)(\d+(?:[.,]\d+)?)\s*s(?:\s|$)/i);
+      dataPlyNodes.push({
+        ply: el.getAttribute('data-ply') || '',
+        text: txt.slice(0, 120),
+        title: title.slice(0, 100),
+        ariaLabel: aria.slice(0, 100),
+        className,
+        seconds: match ? Number(match[1].replace(',', '.')) : null
+      });
+      addShadow(el);
     }
     for (const selector of clockSelectors) {
       let nodes = [];
-      try { nodes = Array.from(root.querySelectorAll(selector)).slice(0, 60); } catch (_) {}
+      try { nodes = Array.from(root.querySelectorAll(selector)).slice(0, 100); } catch (_) {}
       for (const el of nodes) {
-        if (!visible(el)) continue;
-        if (isClock(el.innerText || el.textContent)) clockEls.add(el);
-        if (el.shadowRoot && !seenRoots.has(el.shadowRoot) && roots.length < 14) {
-          seenRoots.add(el.shadowRoot); roots.push(el.shadowRoot);
-        }
+        if (visible(el) && isClock(el.innerText || el.textContent)) clockEls.add(el);
+        addShadow(el);
       }
     }
     try {
-      for (const el of Array.from(root.querySelectorAll('wc-chess-board,wc-simple-move-list,wc-vertical-move-list,wc-chess-clock')).slice(0, 25)) {
-        if (el.shadowRoot && !seenRoots.has(el.shadowRoot) && roots.length < 14) {
-          seenRoots.add(el.shadowRoot); roots.push(el.shadowRoot);
-        }
-      }
+      for (const el of Array.from(root.querySelectorAll(
+        'wc-chess-board,wc-simple-move-list,wc-vertical-move-list,wc-chess-clock'
+      )).slice(0, 50)) addShadow(el);
     } catch (_) {}
   }
+
+  const contextOf = el => {
+    const parts = [];
+    let cur = el;
+    for (let depth = 0; cur && depth < 6; depth++) {
+      try {
+        parts.push(String(cur.className || ''));
+        parts.push(String(cur.id || ''));
+        parts.push(String(cur.getAttribute && cur.getAttribute('aria-label') || ''));
+        parts.push(String(cur.getAttribute && cur.getAttribute('data-cy') || ''));
+        parts.push(String(cur.getAttribute && cur.getAttribute('data-testid') || ''));
+        parts.push(String(cur.getAttribute && cur.getAttribute('title') || ''));
+        cur = cur.parentElement;
+      } catch (_) { break; }
+    }
+    return norm(parts.join(' '));
+  };
   const clocks = [];
   const clockNodes = Array.from(clockEls).filter(el =>
     !Array.from(clockEls).some(other => other !== el && el.contains(other))
   );
   for (const el of clockNodes) {
     const value = norm(el.innerText || el.textContent);
-    if (isClock(value)) clocks.push({value, className: String(el.className || '').slice(0, 100)});
+    if (!isClock(value)) continue;
+    const context = contextOf(el);
+    let side = '';
+    if (/\b(white|light|player-white|white-player|whiteclock|white-clock)\b/i.test(context)) side = 'White';
+    else if (/\b(black|dark|player-black|black-player|blackclock|black-clock)\b/i.test(context)) side = 'Black';
+    clocks.push({
+      value,
+      side,
+      context: context.slice(0, 220),
+      className: String(el.className || '').slice(0, 100),
+      ariaLabel: norm(el.getAttribute('aria-label') || ''),
+      title: norm(el.getAttribute('title') || '')
+    });
   }
-  let boardVisible = false, boardSize = null;
-  for (const sel of ['wc-chess-board','chess-board','#board']) {
-    try {
-      const el = Array.from(document.querySelectorAll(sel)).find(visible);
-      if (el) {
-        boardVisible = true;
-        const r = el.getBoundingClientRect();
-        boardSize = [Math.round(r.width), Math.round(r.height)];
-        break;
+
+  const players = [];
+  const playerLinks = new Set();
+  for (const root of roots) {
+    let links = [];
+    try { links = Array.from(root.querySelectorAll('a[href*="/member/"]')).filter(visible).slice(0, 30); } catch (_) {}
+    for (const link of links) {
+      if (playerLinks.has(link)) continue;
+      playerLinks.add(link);
+      const username = (link.getAttribute('href') || '').match(/\/member\/([^/?#]+)/i);
+      let cur = link, ctx = '', pickedText = '';
+      for (let depth = 0; cur && depth < 6; depth++) {
+        const t = norm(cur.innerText || cur.textContent);
+        const a = contextOf(cur);
+        if (t && t.length <= 180) { pickedText = t; ctx = a; }
+        if (/(player|white|black|opponent|member)/i.test(a) && t.length <= 180) break;
+        cur = cur.parentElement;
       }
-    } catch (_) {}
+      const meta = (ctx + ' ' + pickedText).toLowerCase();
+      let side = '';
+      if (/\bwhite\b|player-white|white-player/.test(meta)) side = 'White';
+      else if (/\bblack\b|player-black|black-player/.test(meta)) side = 'Black';
+      const isYou = /\b(you|current-user|own-player|player-self)\b/i.test(meta);
+      const name = norm(link.innerText || link.textContent);
+      if (name || username) players.push({
+        name: name.slice(0, 80),
+        username: username ? decodeURIComponent(username[1]) : '',
+        side, isYou,
+        context: ctx.slice(0, 180),
+        cardText: pickedText.slice(0, 180)
+      });
+    }
+  }
+
+  let boardEl = null, boardSize = null, orientation = '';
+  for (const root of roots) {
+    for (const sel of ['wc-chess-board','chess-board','#board']) {
+      try {
+        const el = Array.from(root.querySelectorAll(sel)).find(visible);
+        if (el) {
+          boardEl = el;
+          const r = el.getBoundingClientRect();
+          boardSize = [Math.round(r.width), Math.round(r.height)];
+          const cls = contextOf(el);
+          if (/orientation-white|orientationwhite|flipped-false/i.test(cls)) orientation = 'White';
+          else if (/orientation-black|orientationblack|flipped-true/i.test(cls)) orientation = 'Black';
+          break;
+        }
+      } catch (_) {}
+    }
+    if (boardEl) break;
+  }
+  const boardPieces = [], highlightedSquares = [];
+  if (boardEl) {
+    const boardRoot = boardEl.shadowRoot || boardEl;
+    let pieces = [];
+    try { pieces = Array.from(boardRoot.querySelectorAll('[class*="piece"]')).filter(visible).slice(0, 64); } catch (_) {}
+    for (const el of pieces) {
+      const cls = String(el.className || '');
+      const tokens = cls.split(/\s+/);
+      let color = '', type = '';
+      for (const tok of tokens) {
+        const m = tok.match(/^([wb])([kqrbnp])$/i);
+        if (m) { color = m[1].toLowerCase() === 'w' ? 'White' : 'Black'; type = m[2].toUpperCase(); break; }
+      }
+      const squareClass = cls.match(/\bsquare-([1-8][1-8])\b/);
+      const dataSquare = el.getAttribute('data-square') || '';
+      if (color && type) boardPieces.push({
+        color, piece: type, square: /^[a-h][1-8]$/.test(dataSquare) ? dataSquare : '',
+        rawSquare: squareClass ? squareClass[1] : '',
+        className: cls.slice(0, 120),
+        ariaLabel: norm(el.getAttribute('aria-label') || '')
+      });
+    }
+    let highlights = [];
+    try { highlights = Array.from(boardRoot.querySelectorAll('[class*="highlight"],[class*="check"]')).filter(visible).slice(0, 40); } catch (_) {}
+    for (const el of highlights) {
+      const cls = String(el.className || '');
+      const sq = cls.match(/\bsquare-([1-8][1-8])\b/);
+      const ds = el.getAttribute('data-square') || '';
+      highlightedSquares.push({
+        square: /^[a-h][1-8]$/.test(ds) ? ds : '',
+        rawSquare: sq ? sq[1] : '',
+        className: cls.slice(0, 120)
+      });
+    }
+  }
+
+  let domTurn = '';
+  const turnSelectors = [
+    '[aria-label*="to move" i]','[data-cy*="turn"]','[class*="turn-indicator"]',
+    '[class*="side-to-move"]','[class*="player-to-move"]'
+  ];
+  for (const root of roots) {
+    for (const sel of turnSelectors) {
+      try {
+        const el = Array.from(root.querySelectorAll(sel)).find(visible);
+        if (el) {
+          const t = norm((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || el.textContent) + ' ' + contextOf(el));
+          if (/\bwhite\b/i.test(t)) { domTurn = 'White'; break; }
+          if (/\bblack\b/i.test(t)) { domTurn = 'Black'; break; }
+        }
+      } catch (_) {}
+    }
+    if (domTurn) break;
   }
   const activeRe = /^(resign|offer draw|takeback|claim draw|abort game)$/i;
   let activeControls = false;
@@ -143,27 +310,40 @@ SNAPSHOT_JS = r"""return (() => {
     );
   } catch (_) {}
   const resultRe = /\b(checkmate|stalemate|game over|you won|you lost|white wins|black wins|won on time|resignation|resigned|draw by|drawn game|game aborted)\b/i;
-  let resultVisible = false;
+  let resultVisible = false, resultText = '';
   for (const sel of ['[class*="game-over"]','[class*="game-result"]','[data-cy*="game-result"]','[data-cy*="game-over"]']) {
     try {
-      if (Array.from(document.querySelectorAll(sel)).some(el => visible(el) && resultRe.test(el.innerText || el.textContent || ''))) {
-        resultVisible = true; break;
-      }
+      const el = Array.from(document.querySelectorAll(sel)).find(el => visible(el) && resultRe.test(el.innerText || el.textContent || ''));
+      if (el) { resultVisible = true; resultText = norm(el.innerText || el.textContent).slice(0, 250); break; }
     } catch (_) {}
   }
+  const statusText = norm(document.body?.innerText || '').slice(0, 2500);
+  const directMoves = directGroups['[class*="notation"]'] && directGroups['[class*="notation"]'].length
+    ? directGroups['[class*="notation"]']
+    : (directGroups['[class*="main-line-ply"]'] || []);
+  const moveTimes = dataPlyNodes.filter(x => Number.isFinite(x.seconds));
   return {
-    url: location.href, title: document.title, boardVisible, boardSize,
-    activeControls, resultVisible, clocks: clocks.slice(0, 4),
-    moveTexts: moveTexts.slice(0, 35),
-    bodyHint: norm(document.body?.innerText || '').slice(0, 350)
+    url: location.href, title: document.title,
+    boardVisible: !!boardEl, boardSize, orientation, boardPieces, highlightedSquares,
+    activeControls, resultVisible, resultText, clocks: clocks.slice(0, 6),
+    players: players.slice(0, 8), domTurn,
+    directMoves: directMoves.slice(0, 500),
+    directMoveSelector: directMoves.length ? directMoves[0].selector : '',
+    moveTimes: moveTimes.slice(0, 250),
+    dataPlyNodes: dataPlyNodes.slice(0, 100),
+    moveTexts: moveTexts.slice(0, 60),
+    bodyHint: statusText.slice(0, 500)
   };
 })();"""
 
 CSV_FIELDS = [
     "event", "game_id", "game_url", "game_started_at", "ply", "side", "move",
-    "time_taken_seconds_estimate", "move_observed_at", "clock_1", "clock_2", "note"
+    "time_taken_seconds_estimate", "move_time_seconds_dom", "time_source",
+    "move_observed_at", "clock_1", "clock_2", "white_clock", "black_clock",
+    "your_clock", "opponent_clock", "side_to_move", "white_player", "black_player",
+    "move_count", "last_move", "game_status", "board_pieces_json",
+    "highlighted_squares_json", "note"
 ]
-
 
 def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="milliseconds")
@@ -247,36 +427,172 @@ def is_chess_page(url: str) -> bool:
         return False
 
 
+def _candidate_tokens(text: str) -> list[str]:
+    cleaned = str(text or "").translate(FIGURINE_MAP)
+    cleaned = re.sub(r"\b\d+\.(?:\.\.)?", " ", cleaned)
+    return [token.strip() for token in SAN_PATTERN.findall(cleaned)]
+
+
+def _legal_prefix(candidates: list[str]) -> list[str]:
+    board = chess.Board()
+    legal: list[str] = []
+    for token in candidates:
+        try:
+            move = board.parse_san(token)
+        except (ValueError, chess.IllegalMoveError, chess.AmbiguousMoveError):
+            break
+        legal.append(board.san(move))
+        board.push(move)
+    return legal
+
+
 def parse_moves(snapshot: dict) -> list[str]:
-    """Return only a legal SAN prefix; reject partial/garbled figurine text."""
-    best: list[str] = []
-    best_text = ""
-    for candidate in snapshot.get("moveTexts", []):
-        text = str(candidate.get("text", "")).translate(FIGURINE_MAP)
-        found = [token.strip() for token in SAN_PATTERN.findall(text)]
+    """Prefer individual move nodes; use broad text only as a fallback."""
+    direct = snapshot.get("directMoves") or []
+    best_direct: list[str] = []
+    for candidate in direct:
+        found = _candidate_tokens(candidate.get("text", ""))
         if not found:
             continue
+        legal = _legal_prefix(found)
+        if len(legal) > len(best_direct):
+            best_direct = legal
 
-        board = chess.Board()
-        legal_prefix: list[str] = []
-        for token in found:
-            try:
-                move = board.parse_san(token)
-            except (ValueError, chess.IllegalMoveError, chess.AmbiguousMoveError):
-                break
-            legal_prefix.append(board.san(move))
-            board.push(move)
+    best_generic: list[str] = []
+    if not best_direct or len(best_direct) < 2:
+        for candidate in snapshot.get("moveTexts", []):
+            found = _candidate_tokens(candidate.get("text", ""))
+            if not found:
+                continue
+            legal = _legal_prefix(found)
+            if len(legal) > len(best_generic):
+                best_generic = legal
 
-        if len(legal_prefix) > len(best) or (
-            len(legal_prefix) == len(best) and len(legal_prefix) and len(text) > len(best_text)
-        ):
-            best, best_text = legal_prefix, text
-    return best
+    if len(best_direct) >= len(best_generic):
+        return best_direct
+    return best_generic
 
 
-def get_clocks(snapshot: dict) -> tuple[str, str]:
-    values = [str(x.get("value", "")) for x in snapshot.get("clocks", [])]
-    return (values[0] if values else "", values[1] if len(values) > 1 else "")
+def get_clock_details(snapshot: dict) -> dict[str, str]:
+    values = snapshot.get("clocks", [])
+    result = {"clock_1": "", "clock_2": "", "white_clock": "", "black_clock": ""}
+    ordered = []
+    for item in values:
+        value = str(item.get("value", "")).strip()
+        if not value:
+            continue
+        ordered.append(value)
+        side = str(item.get("side", "")).strip().lower()
+        if side == "white" and not result["white_clock"]:
+            result["white_clock"] = value
+        elif side == "black" and not result["black_clock"]:
+            result["black_clock"] = value
+    result["clock_1"] = ordered[0] if ordered else ""
+    result["clock_2"] = ordered[1] if len(ordered) > 1 else ""
+    # Order-only clocks are intentionally not guessed to be White/Black.
+    if not result["white_clock"] and len(ordered) == 1 and values[0].get("side", "") == "White":
+        result["white_clock"] = ordered[0]
+    return result
+
+
+def get_turn(snapshot: dict, moves: list[str]) -> str:
+    explicit = str(snapshot.get("domTurn", "")).strip()
+    if explicit in ("White", "Black"):
+        return explicit
+    # Parity is a fallback only; it depends on a complete move list from move one.
+    if moves:
+        return "White" if len(moves) % 2 == 0 else "Black"
+    return ""
+
+
+def get_player_details(snapshot: dict) -> dict[str, str]:
+    players = snapshot.get("players", [])
+    result = {"white_player": "", "black_player": "", "your_side": ""}
+    for player in players:
+        name = str(player.get("name") or player.get("username") or "").strip()
+        side = str(player.get("side", "")).strip()
+        if side == "White" and name and not result["white_player"]:
+            result["white_player"] = name
+        elif side == "Black" and name and not result["black_player"]:
+            result["black_player"] = name
+        if player.get("isYou") and side in ("White", "Black"):
+            result["your_side"] = side
+    return result
+
+
+def move_times_by_ply(snapshot: dict, total_moves: int) -> dict[int, float]:
+    """Read only explicit time annotations tied to a data-ply node."""
+    records = snapshot.get("moveTimes", [])
+    found: dict[int, float] = {}
+    numeric_plies = []
+    for item in records:
+        try:
+            ply = int(str(item.get("ply", "")).strip())
+        except (TypeError, ValueError):
+            continue
+        seconds = item.get("seconds")
+        if seconds is None:
+            continue
+        try:
+            seconds = float(seconds)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= ply <= max(total_moves, 250):
+            numeric_plies.append(ply)
+            found[ply] = seconds
+    # Some DOMs number data-ply from zero; shift only when the first mapped ply is zero.
+    if numeric_plies and min(numeric_plies) == 0 and 1 not in found:
+        found = {ply + 1: seconds for ply, seconds in found.items()}
+    # Never assign a displayed duration to an unrelated ply based on list order.
+    return {ply: seconds for ply, seconds in found.items() if 1 <= ply <= total_moves}
+
+
+def clock_context(snapshot: dict, moves: list[str]) -> dict[str, str]:
+    clocks = get_clock_details(snapshot)
+    players = get_player_details(snapshot)
+    turn = get_turn(snapshot, moves)
+    your_clock = ""
+    opponent_clock = ""
+    if players["your_side"] == "White":
+        your_clock, opponent_clock = clocks["white_clock"], clocks["black_clock"]
+    elif players["your_side"] == "Black":
+        your_clock, opponent_clock = clocks["black_clock"], clocks["white_clock"]
+    return {
+        **clocks,
+        "your_clock": your_clock,
+        "opponent_clock": opponent_clock,
+        "side_to_move": turn,
+        "white_player": players["white_player"],
+        "black_player": players["black_player"],
+    }
+
+
+def board_json(snapshot: dict, key: str) -> str:
+    try:
+        return json.dumps(snapshot.get(key, []), ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return "[]"
+
+
+def game_status(snapshot: dict) -> str:
+    if snapshot.get("resultVisible"):
+        return str(snapshot.get("resultText") or "finished")
+    if snapshot.get("activeControls"):
+        return "active"
+    if snapshot.get("boardVisible"):
+        return "board-visible"
+    return "unknown"
+
+
+def event_context(snapshot: dict, moves: list[str]) -> dict[str, str]:
+    return {
+        **clock_context(snapshot, moves),
+        "move_count": str(len(moves)),
+        "last_move": moves[-1] if moves else "",
+        "game_status": game_status(snapshot),
+        "board_pieces_json": board_json(snapshot, "boardPieces"),
+        "highlighted_squares_json": board_json(snapshot, "highlightedSquares"),
+    }
 
 
 def num_clock(value: str) -> float | None:
@@ -290,14 +606,13 @@ def num_clock(value: str) -> float | None:
     except (TypeError, ValueError):
         return None
 
-
 def main() -> None:
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     print("[START] SeleniumBase normal Chrome mode + read-only Chess.com tracker.")
     print("[INFO] Profile:", PROFILE_DIR)
     print("[INFO] CSV:", LOG_FILE)
     print("[INFO] Browser will open blank. Open Chess.com and start your game manually.")
-    print("[INFO] No UC/stealth mode, clicks, or chess moves. Stop: Ctrl+C.")
+    print("[INFO] DOM-only/read-only. Captures visible clocks, move annotations, players, turn, result, and piece metadata. No clicks or chess moves. Stop: Ctrl+C.")
 
     try:
         driver = Driver(
@@ -324,6 +639,8 @@ def main() -> None:
     result_visible_streak = 0
     completed_game_urls: set[str] = set()
     last_debug_signature = ""
+    last_clock_log_signature: tuple[str, ...] = ()
+    last_clock_log_mono = 0.0
 
     try:
         while True:
@@ -357,19 +674,34 @@ def main() -> None:
                 continue
 
             moves = parse_moves(snapshot)
-            clocks = tuple(str(x.get("value", "")) for x in snapshot.get("clocks", [])[:2])
+            clock_details = get_clock_details(snapshot)
+            clocks = (clock_details["clock_1"], clock_details["clock_2"])
             now = now_iso()
             mono = time.monotonic()
+            dom_move_times = move_times_by_ply(snapshot, len(moves))
 
             if snapshot.get("resultVisible"):
                 result_visible_streak += 1
             else:
                 result_visible_streak = 0
 
-            if os.environ.get("CHESS_DOM_DEBUG") == "1" and snapshot.get("moveTexts"):
-                signature = repr([(item.get("selector"), item.get("text", "")[:220]) for item in snapshot["moveTexts"][:8]])
+            if os.environ.get("CHESS_DOM_DEBUG") == "1":
+                signature = repr({
+                    "directSelector": snapshot.get("directMoveSelector"),
+                    "directMoves": [x.get("text", "") for x in snapshot.get("directMoves", [])[:50]],
+                    "moveTimes": snapshot.get("moveTimes", [])[:30],
+                    "clocks": snapshot.get("clocks", []),
+                    "players": snapshot.get("players", []),
+                    "turn": snapshot.get("domTurn"),
+                    "pieces": snapshot.get("boardPieces", [])[:8],
+                })
                 if signature != last_debug_signature:
-                    print("[DOM DEBUG] move-list candidates (raw text):", signature)
+                    print("[DOM DEBUG] structured visible DOM:", signature[:6000])
+                    if snapshot.get("moveTexts"):
+                        print("[DOM DEBUG] generic fallback:", repr([
+                            (item.get("selector"), item.get("text", "")[:180])
+                            for item in snapshot["moveTexts"][:8]
+                        ]))
                     last_debug_signature = signature
 
             ticked = False
@@ -409,7 +741,7 @@ def main() -> None:
             if active_game and result_visible_streak >= 3:
                 append_csv({
                     "event": "GAME_ENDED", "game_id": active_game["id"], "game_url": active_game["url"],
-                    "game_started_at": active_game["started_at"], "move_observed_at": now,
+                    "game_started_at": active_game["started_at"], "move_observed_at": now, **event_context(snapshot, moves),
                     "note": "Explicit game-result container remained visible for 3 polls"
                 })
                 completed_game_urls.add(active_game["url"])
@@ -422,7 +754,7 @@ def main() -> None:
             ):
                 append_csv({
                     "event": "GAME_ENDED", "game_id": active_game["id"], "game_url": active_game["url"],
-                    "game_started_at": active_game["started_at"], "move_observed_at": now,
+                    "game_started_at": active_game["started_at"], "move_observed_at": now, **event_context(snapshot, moves),
                     "note": "Visible move list reset or changed"
                 })
                 active_game, last_moves = None, []
@@ -437,21 +769,46 @@ def main() -> None:
                 c1, c2 = get_clocks(snapshot)
                 append_csv({
                     "event": "GAME_DETECTED", "game_id": active_game["id"], "game_url": url,
-                    "game_started_at": now, "move_observed_at": now, "clock_1": c1, "clock_2": c2,
-                    "note": "Board and active-game controls/clock/moves detected"
+                    "game_started_at": now, "move_observed_at": now, **event_context(snapshot, moves),
+                    "note": "Actual game page detected from visible DOM"
                 })
+                ctx = event_context(snapshot, moves)
                 print(f"[GAME DETECTED] {url} | existing moves: {len(moves)}")
+                print(f"[BOARD] {ctx['white_player'] or 'White?'} ({ctx['white_clock'] or 'clock unknown'}) vs {ctx['black_player'] or 'Black?'} ({ctx['black_clock'] or 'clock unknown'}) | turn {ctx['side_to_move'] or 'unknown'} | pieces {len(snapshot.get('boardPieces', []))}")
+                print(f"[DOM] direct move nodes: {len(snapshot.get('directMoves', []))} via {snapshot.get('directMoveSelector') or 'fallback'} | explicit move-time values: {len(snapshot.get('moveTimes', []))} | highlighted squares: {len(snapshot.get('highlightedSquares', []))}")
                 for index, move in enumerate(moves, start=1):
                     append_csv({
                         "event": "HISTORY_MOVE", "game_id": active_game["id"], "game_url": url,
                         "game_started_at": now, "ply": index,
                         "side": "White" if index % 2 else "Black", "move": move,
-                        "move_observed_at": now, "clock_1": c1, "clock_2": c2,
-                        "note": "Move already visible at detection; time unknown"
+                        "move_observed_at": now, **event_context(snapshot, moves),
+                        "note": "Move already visible at detection; individual move duration unavailable"
                     })
                 warned_move_list = False
 
             if active_game:
+                ctx_now = event_context(snapshot, moves)
+                live_signature = (
+                    ctx_now["white_clock"], ctx_now["black_clock"], ctx_now["clock_1"], ctx_now["clock_2"],
+                    ctx_now["side_to_move"], ctx_now["white_player"], ctx_now["black_player"],
+                    ctx_now["move_count"], ctx_now["game_status"]
+                )
+                if live_signature != last_clock_log_signature and mono - last_clock_log_mono >= 0.9:
+                    append_csv({
+                        "event": "CLOCK", "game_id": active_game["id"], "game_url": active_game["url"],
+                        "game_started_at": active_game["started_at"], "move_observed_at": now, **ctx_now,
+                        "note": "Visible DOM clock/board snapshot; remaining time is the displayed clock value"
+                    })
+                    print(
+                        f"[CLOCK] White {ctx_now['white_clock'] or ctx_now['clock_1'] or '?'} | "
+                        f"Black {ctx_now['black_clock'] or ctx_now['clock_2'] or '?'} | "
+                        f"you {ctx_now['your_clock'] or '?'} / opponent {ctx_now['opponent_clock'] or '?'} | "
+                        f"turn {ctx_now['side_to_move'] or '?'} | moves {ctx_now['move_count']} | "
+                        f"pieces {len(snapshot.get('boardPieces', []))}"
+                    )
+                    last_clock_log_signature = live_signature
+                    last_clock_log_mono = mono
+
                 if len(moves) > len(last_moves) and moves[:len(last_moves)] == last_moves:
                     added = moves[len(last_moves):]
                     c1, c2 = get_clocks(snapshot)
@@ -459,26 +816,38 @@ def main() -> None:
                         elapsed = round(max(0.0, mono - last_move_time), 2)
                         ply = len(last_moves) + 1
                         side = "White" if ply % 2 else "Black"
+                        dom_seconds = dom_move_times.get(ply)
+                        ctx = event_context(snapshot, moves)
+                        time_source = "Chess.com DOM annotation" if dom_seconds is not None else "poll-interval estimate"
                         append_csv({
                             "event": "MOVE", "game_id": active_game["id"], "game_url": active_game["url"],
                             "game_started_at": active_game["started_at"], "ply": ply, "side": side,
-                            "move": added[0], "time_taken_seconds_estimate": elapsed,
-                            "move_observed_at": now, "clock_1": c1, "clock_2": c2,
-                            "note": "Approximate interval between move-list updates; not official clock time"
+                            "move": added[0],
+                            "time_taken_seconds_estimate": "" if dom_seconds is not None else elapsed,
+                            "move_time_seconds_dom": "" if dom_seconds is None else dom_seconds,
+                            "time_source": time_source,
+                            "move_observed_at": now, **ctx,
+                            "note": "Exact displayed per-move duration from DOM" if dom_seconds is not None else "Displayed per-move duration not found; poll interval is only an estimate"
                         })
-                        print(f"[MOVE] {side} {added[0]} | ~{elapsed:.2f}s | clocks {c1 or '?'} / {c2 or '?'}")
+                        duration_label = f"DOM {dom_seconds:.2f}s" if dom_seconds is not None else f"~{elapsed:.2f}s estimate"
+                        print(f"[MOVE] {side} {added[0]} | {duration_label} | White {ctx['white_clock'] or '?'} / Black {ctx['black_clock'] or '?'} | turn {ctx['side_to_move'] or '?'}")
                         last_move_time = mono
                     else:
                         for offset, move in enumerate(added, start=1):
                             ply = len(last_moves) + offset
+                            dom_seconds = dom_move_times.get(ply)
+                            ctx = event_context(snapshot, moves)
                             append_csv({
                                 "event": "MOVE", "game_id": active_game["id"], "game_url": active_game["url"],
                                 "game_started_at": active_game["started_at"], "ply": ply,
                                 "side": "White" if ply % 2 else "Black", "move": move,
-                                "move_observed_at": now, "clock_1": c1, "clock_2": c2,
-                                "note": "Multiple moves arrived between polls; individual timing unknown"
+                                "move_time_seconds_dom": "" if dom_seconds is None else dom_seconds,
+                                "time_source": "Chess.com DOM annotation" if dom_seconds is not None else "unknown (multiple moves between polls)",
+                                "move_observed_at": now, **ctx,
+                                "note": "Explicit DOM duration available" if dom_seconds is not None else "Multiple moves arrived between polls; individual duration unavailable"
                             })
-                            print(f"[MOVE] {'White' if ply % 2 else 'Black'} {move} | time unknown")
+                            duration_label = f"DOM {dom_seconds:.2f}s" if dom_seconds is not None else "time unknown"
+                            print(f"[MOVE] {'White' if ply % 2 else 'Black'} {move} | {duration_label}")
                         last_move_time = mono
                     last_moves = moves[:]
                     warned_move_list = False
