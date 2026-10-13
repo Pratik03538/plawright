@@ -2,60 +2,64 @@
 
 A separate Playwright-based browser test build adapted from the FAST-MAIN chess vision baseline. The legacy `chesskida` repository and its branches are read-only inputs; this repository is the isolated workspace.
 
-## What it currently does
+## Browser mode: reuse your existing Chrome window
 
-- Launches a persistent Playwright Chromium profile.
-- Uses Chromium viewport screenshots with the existing OpenCV board recognition and visual verification pipeline in `main_playwright.py`.
-- Sends board clicks through Playwright's browser mouse API.
-- Keeps the existing `python-chess`, Stockfish, and GM-book selection code.
+This build can attach to the already-open Chrome instance so Chess.com loads with that browser's normal setup. It will find the existing Chess.com Computer tab and will not navigate the ChatGPT tab.
+
+### One-time setup
+
+1. In the Chrome window that already has ChatGPT and Chess.com open, enter `chrome://inspect/#remote-debugging`.
+2. Enable **Allow remote debugging for this browser instance** and approve Chrome's confirmation prompt.
+3. Confirm Chrome shows a local debugging endpoint, normally `127.0.0.1:9222`. Keep Chrome open.
+
+Only enable remote debugging on your own trusted machine. It gives the local automation process control of open browser tabs.
+
+### Run the DOM inspector
+
+```powershell
+git pull --ff-only origin main
+python -m py_compile .\inspect_chess_dom.py
+python .\inspect_chess_dom.py
+```
+
+The inspector attaches to the existing Chrome and selects a tab whose URL contains `chess.com/play/computer`. If the endpoint uses another port, set `$env:CHROME_CDP_ENDPOINT = "http://127.0.0.1:PORT"` before running.
+
+### Run the current browser bot
+
+```powershell
+python -m py_compile .\main_playwright.py
+python .\main_playwright.py
+```
+
+The bot also attaches to the existing Chrome. It does not close the browser when it exits. Its chess tracking still uses the legacy screenshot/OpenCV pipeline at this stage; DOM-driven move tracking is not yet integrated.
 
 ## Requirements
 
 - Windows desktop with Python 3.10+ recommended.
-- Playwright Chromium, OpenCV, NumPy, mss, python-chess.
+- Playwright, OpenCV, NumPy, mss, python-chess.
 - Local `stockfish.exe` placed in the repository root.
 - Piece templates in `pieces_png/`.
 - Optional `Ultimate_GM_Bullet.bin` in the repository root.
 
-## Setup
+Install packages if needed:
 
-Open a terminal in this repository directory:
-
-```bat
+```powershell
 python -m pip install -r requirements.txt
 python -m playwright install chromium
 ```
 
-Place the required local engine/template assets alongside the code. Then run:
-
-```bat
-python main_playwright.py
-```
-
-The browser profile is saved in `playwright_chess_profile/`. Use a local or otherwise authorized test setup, and verify each move before unattended use.
-
 ## Event-driven DOM/FEN experiment
 
-A separate proof-of-concept shows how an owned test page can publish a complete FEN and move metadata for each committed move. Playwright listens for a `chess:position` custom event and uses a `MutationObserver` as a fallback, rather than repeatedly screenshotting the board.
+A local proof-of-concept shows how an owned test page can publish a complete FEN and move metadata for each move. Playwright listens for a `chess:position` event with a `MutationObserver` fallback:
 
-Run:
-
-```bat
-python dom_event_watcher.py
+```powershell
+python .\dom_event_watcher.py
 ```
 
-A local demo page opens. Click **Apply next move**; the Python terminal should print the new ply, actor, move and validated FEN. The watcher observes `[data-chess-board]` and its `data-fen` attribute, and reads the visible move list from `[data-move-list]`.
+Click **Apply next move** in the demo page; the Python terminal should print the move and validated FEN. This demo is separate from `main_playwright.py`.
 
-## Inspect a browser page's visible DOM
+## Known limitations
 
-To see which board/piece/move-list elements are actually exposed on the target test page, run (this uses a separate Chromium profile, so you may need to sign in once):
-
-```bat
-python inspect_chess_dom.py
-```
-
-Sign in if needed, start/open the test game, wait for the board and move list, then return to the terminal and press Enter. It prints candidate DOM elements and installs a `MutationObserver` that logs relevant board/piece/move-list changes. Make one move and inspect the output. It uses bounded DOM queries to avoid exhaustively traversing a large page. It only inspects browser DOM; it does not inspect network traffic or private endpoints. Stop it with Ctrl+C.
-
-## Important implementation note
-
-The DOM watcher is currently a separate test experiment. `main_playwright.py` still uses screenshots and OpenCV; it has not yet been converted to consume DOM events. The diagnostic output must first show whether the target page exposes enough reliable position or move-history state to support such a conversion. Full end-to-end testing has not been completed in this environment.
+- `main_playwright.py` still uses screenshots and OpenCV for move recognition; it has not yet been converted to consume the Chess.com DOM.
+- The DOM watcher requires a page to expose complete, reliable position data. An observed DOM element is not automatically a complete FEN.
+- End-to-end testing against a real computer game is still pending. Verify the position before relying on the bot.
