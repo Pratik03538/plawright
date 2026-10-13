@@ -63,3 +63,14 @@ Click **Apply next move** in the demo page; the Python terminal should print the
 - `main_playwright.py` still uses screenshots and OpenCV for move recognition; it has not yet been converted to consume the Chess.com DOM.
 - The DOM watcher requires a page to expose complete, reliable position data. An observed DOM element is not automatically a complete FEN.
 - End-to-end testing against a real computer game is still pending. Verify the position before relying on the bot.
+
+## Read-only game-state check (recommended next test)
+
+Once the existing Chrome window has remote debugging enabled and the Chess.com Computer tab is open, run:
+
+```powershell
+python -m py_compile .\check_chess_game_state.py
+python .\check_chess_game_state.py
+```
+
+It reads only the current page DOM and reports the visible bot-loading status, board presence, raw piece/square classes, and move-list candidates. It does not click or make moves, and it does not close the user's Chrome tabs. The check is a snapshot: if the game is still loading, rerun after the page's state changes.
