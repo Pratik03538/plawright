@@ -37,7 +37,12 @@ def resolve_chrome_cdp_endpoint(configured: str | None = None) -> str:
             Path(local_app_data) / "Google" / "Chrome" / "User Data" / "DevToolsActivePort"
         )
 
-    configured_port = parsed.port
+    try:
+        configured_port = parsed.port
+    except ValueError:
+        # e.g. a user previously copied the literal placeholder :PORT.
+        configured_port = None
+
     for active_file in candidates:
         try:
             lines = active_file.read_text(encoding="utf-8").splitlines()
