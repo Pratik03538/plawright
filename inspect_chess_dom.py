@@ -220,6 +220,8 @@ def main() -> None:
             page.on("requestfailed", on_request_failed)
             page.on("response", on_response)
             page.on("websocket", on_websocket)
+            page.on("console", lambda msg: print(f"[CONSOLE {msg.type.upper()}] {msg.text[:500]}") if msg.type == "error" else None)
+            page.on("pageerror", lambda exc: print(f"[PAGE ERROR] {str(exc)[:800]}"))
             page.on("crash", lambda _: print("[ERROR] Chromium renderer crashed. Restart the inspector and try again."))
             page.on("close", lambda _: print("[WARN] Browser page was closed."))
             context.on("close", lambda _: print("[WARN] Chromium context closed."))
