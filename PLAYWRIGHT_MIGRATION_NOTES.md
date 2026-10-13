@@ -11,7 +11,7 @@
 
 ## Event-driven DOM/FEN proof of concept
 
-The new `dom_event_watcher.py` and `dom_event_test.html` are a separate local test. The page exposes a complete FEN and move metadata in declared DOM attributes. A Playwright-injected `MutationObserver` signals Python when those attributes change, and Python validates the FEN using python-chess.
+The new `dom_event_watcher.py` and `dom_event_test.html` are a separate local test. The page exposes a complete FEN and move metadata in DOM attributes and dispatches a `chess:position` custom event for every committed move. Playwright receives that event immediately; a `MutationObserver` is the fallback for pages that expose only DOM state changes. Python validates the FEN with python-chess.
 
 Run from the project directory:
 
@@ -19,9 +19,9 @@ Run from the project directory:
 python dom_event_watcher.py
 ```
 
-Click **Apply next move** in the demo browser page and inspect the terminal output. There is no periodic screenshot or grid-recognition loop in this watcher; it waits for DOM changes. It reads only visible/exposed DOM fields and does not inspect private network endpoints.
+Click **Apply next move** in the demo browser page and inspect the terminal output. The watcher does not run a timed screenshot/grid scan loop. It reads only visible/exposed DOM fields and does not inspect private network endpoints.
 
-This is a proof of concept, not yet integration into `main_playwright.py`. It will work with another page only if that page explicitly exposes a complete and reliable FEN in a DOM attribute matching the chosen selector/attribute. If such state is not exposed, the watcher cannot conjure it from DOM mutations.
+This is a proof of concept, not yet integration into `main_playwright.py`. It will work with another page only if that page explicitly exposes a complete and reliable FEN in a DOM attribute matching the chosen selector/attribute, or provides a corresponding position event. If such state is not exposed, the watcher cannot conjure it from DOM mutations.
 
 ## Install and run the existing browser build (Windows)
 
