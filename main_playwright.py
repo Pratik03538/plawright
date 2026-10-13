@@ -4,6 +4,7 @@ import numpy as np
 import mss  # retained for baseline compatibility; Playwright captures the browser in this build
 import ctypes
 from contextlib import contextmanager
+from urllib.parse import urlsplit
 
 try:
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -26,75 +27,80 @@ BROWSER_PAGE = None
 BROWSER_CONTEXT = None
 BROWSER_HANDLE = 1  # sentinel used only by the legacy function signatures
 BROWSER_URL = os.environ.get("CHESS_BOT_URL", "https://www.chess.com/play/computer")
-BROWSER_PROFILE_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "playwright_chess_profile"
-)
+BROWSER_CDP_ENDPOINT = os.environ.get("CHROME_CDP_ENDPOINT", "http://127.0.0.1:9222")
 
 
 @contextmanager
 def playwright_browser_session():
-    """Launch a persistent Chromium profile and expose its page to legacy code.
+    """Attach to the user's already-open Chrome and reuse its Chess.com tab.
 
-    Log in and start a game against the site's computer opponent in this Chromium
-    window. The separate persistent profile keeps that login between runs.
+    Enable Chrome's approved remote-debugging endpoint at
+    chrome://inspect/#remote-debugging before starting this function.
+    The user's ChatGPT and other tabs are left untouched.
     """
     global BROWSER_PAGE, BROWSER_CONTEXT
     if sync_playwright is None:
         raise RuntimeError(
-            "Playwright is not installed. Run: python -m pip install playwright && "
-            "python -m playwright install chromium"
+            "Playwright is not installed. Run: python -m pip install playwright"
         )
 
     with sync_playwright() as playwright:
-        context = playwright.chromium.launch_persistent_context(
-            user_data_dir=BROWSER_PROFILE_DIR,
-            headless=False,
-            no_viewport=True,
-            args=["--start-maximized"],
-        )
         try:
-            page = context.pages[0] if context.pages else context.new_page()
-            BROWSER_CONTEXT = context
-            BROWSER_PAGE = page
-            page.set_default_timeout(5000)
-            if not page.url.startswith(BROWSER_URL):
-                # A slow/blocked DOMContentLoaded should not abort the whole tracker.
-                # First wait for the initial document commit, then give the page a
-                # bounded window to finish DOM parsing.
-                try:
-                    page.goto(BROWSER_URL, wait_until="commit", timeout=30000)
-                except PlaywrightTimeoutError as exc:
-                    print(
-                        "[WARN] Browser navigation did not reach document commit "
-                        f"within 30 seconds: {exc}"
-                    )
-                    print(
-                        "[WARN] The browser will remain open. If it is blank, "
-                        "navigate to the computer-test page manually."
-                    )
-
-            try:
-                page.wait_for_load_state("domcontentloaded", timeout=15000)
-            except PlaywrightTimeoutError:
-                print(
-                    "[WARN] DOMContentLoaded did not fire within 15 seconds; "
-                    "continuing with the current browser page."
-                )
-
-            print("[PLAYWRIGHT] Chromium opened:", page.url)
-            print(
-                "[PLAYWRIGHT] Sign in if required, start a game versus the computer, "
-                "then press R in the tracker."
+            browser = playwright.chromium.connect_over_cdp(
+                BROWSER_CDP_ENDPOINT,
+                timeout=10000
             )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Cannot attach to existing Chrome at {BROWSER_CDP_ENDPOINT}: {exc}\n"
+                "In the same Chrome window, open chrome://inspect/#remote-debugging, "
+                "enable 'Allow remote debugging for this browser instance', approve the prompt, "
+                "then rerun the bot. Keep that Chrome window open."
+            ) from exc
+
+        contexts = browser.contexts
+        if not contexts:
+            raise RuntimeError(
+                "Chrome CDP connection succeeded, but no browser context was found."
+            )
+        context = contexts[0]
+        pages = context.pages
+
+        # Select the existing Chess.com Computer tab. Never repurpose the
+        # active ChatGPT tab just because it happens to be first.
+        page = next(
+            (
+                candidate for candidate in reversed(pages)
+                if (urlsplit(candidate.url).hostname or "").endswith("chess.com")
+                and "/play/computer" in candidate.url
+            ),
+            None,
+        )
+
+        if page is None:
+            page = context.new_page()
+            print("[PLAYWRIGHT] No existing Computer tab found; opening a new tab in the same Chrome window.")
+            try:
+                page.goto(BROWSER_URL, wait_until="domcontentloaded", timeout=45000)
+            except PlaywrightTimeoutError as exc:
+                print(f"[WARN] Initial navigation timed out: {exc}")
+                print("[WARN] Keep the Chess.com tab open and navigate it manually if needed.")
+
+        BROWSER_CONTEXT = context
+        BROWSER_PAGE = page
+        page.set_default_timeout(5000)
+
+        print("[PLAYWRIGHT] Attached to existing Chrome:", page.url)
+        print("[PLAYWRIGHT] Existing Chrome tabs are preserved; ChatGPT tab will not be navigated.")
+        print("[PLAYWRIGHT] Start the computer game in the Chess.com tab, then press R in the tracker.")
+        try:
             yield object()  # placeholder for existing capture_screen(sct, hwnd) signatures
         finally:
             BROWSER_PAGE = None
             BROWSER_CONTEXT = None
-            try:
-                context.close()
-            except Exception:
-                pass
+            # Do not call context.close(): this is the user's own Chrome context.
+            # When the Playwright client exits, it detaches instead of closing the browser.
+
 
 
 def _browser_alive():
