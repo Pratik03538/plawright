@@ -258,9 +258,11 @@ SNAPSHOT_JS = r"""return (() => {
   if (boardEl) {
     const boardRoot = boardEl.shadowRoot || boardEl;
     let pieces = [];
-    try { pieces = Array.from(boardRoot.querySelectorAll('[class*="piece"]')).filter(visible).slice(0, 64); } catch (_) {}
+    try { pieces = Array.from(boardRoot.querySelectorAll('[class*="piece"]')).filter(visible).slice(0, 120); } catch (_) {}
+    const bySquare = new Map();
     for (const el of pieces) {
       const cls = String(el.className || '');
+      if (/\bdragging\b/i.test(cls)) continue;
       const tokens = cls.split(/\s+/);
       let color = '', type = '';
       for (const tok of tokens) {
@@ -269,22 +271,33 @@ SNAPSHOT_JS = r"""return (() => {
       }
       const squareClass = cls.match(/\bsquare-([1-8][1-8])\b/);
       const dataSquare = el.getAttribute('data-square') || '';
-      if (color && type) boardPieces.push({
-        color, piece: type, square: /^[a-h][1-8]$/.test(dataSquare) ? dataSquare : '',
-        rawSquare: squareClass ? squareClass[1] : '',
-        className: cls.slice(0, 120),
-        ariaLabel: norm(el.getAttribute('aria-label') || '')
-      });
+      const rawSquare = squareClass ? squareClass[1] : '';
+      const mappedSquare = rawSquare
+        ? String.fromCharCode(96 + Number(rawSquare[0])) + rawSquare[1]
+        : '';
+      const square = /^[a-h][1-8]$/.test(dataSquare) ? dataSquare : mappedSquare;
+      if (color && type && square && !bySquare.has(square)) {
+        bySquare.set(square, {
+          color, piece: type, square, rawSquare,
+          className: cls.slice(0, 120),
+          ariaLabel: norm(el.getAttribute('aria-label') || '')
+        });
+      }
     }
+    boardPieces.push(...bySquare.values());
     let highlights = [];
     try { highlights = Array.from(boardRoot.querySelectorAll('[class*="highlight"],[class*="check"]')).filter(visible).slice(0, 40); } catch (_) {}
     for (const el of highlights) {
       const cls = String(el.className || '');
       const sq = cls.match(/\bsquare-([1-8][1-8])\b/);
       const ds = el.getAttribute('data-square') || '';
+      const rawSquare = sq ? sq[1] : '';
+      const mappedSquare = rawSquare
+        ? String.fromCharCode(96 + Number(rawSquare[0])) + rawSquare[1]
+        : '';
       highlightedSquares.push({
-        square: /^[a-h][1-8]$/.test(ds) ? ds : '',
-        rawSquare: sq ? sq[1] : '',
+        square: /^[a-h][1-8]$/.test(ds) ? ds : mappedSquare,
+        rawSquare,
         className: cls.slice(0, 120)
       });
     }
@@ -439,21 +452,44 @@ def _candidate_tokens(text: str) -> list[str]:
     return [token.strip() for token in SAN_PATTERN.findall(cleaned)]
 
 
+def _resolve_san_or_unique_destination(board: chess.Board, token: str) -> chess.Move | None:
+    """Resolve SAN or a rendered token with its piece glyph omitted."""
+    try:
+        return board.parse_san(token)
+    except (ValueError, chess.IllegalMoveError, chess.AmbiguousMoveError):
+        pass
+
+    cleaned = token.strip()
+    gives_check = cleaned.endswith("+") or cleaned.endswith("#")
+    cleaned = cleaned.rstrip("+#")
+    dest_match = re.search(r"([a-h][1-8])$", cleaned)
+    if not dest_match:
+        return None
+    destination = chess.parse_square(dest_match.group(1))
+    wants_capture = "x" in cleaned
+    candidates = []
+    for move in board.legal_moves:
+        if move.to_square != destination or board.is_capture(move) != wants_capture:
+            continue
+        if gives_check and not board.gives_check(move):
+            continue
+        candidates.append(move)
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def _legal_prefix(candidates: list[str]) -> list[str]:
     board = chess.Board()
     legal: list[str] = []
     for token in candidates:
-        try:
-            move = board.parse_san(token)
-        except (ValueError, chess.IllegalMoveError, chess.AmbiguousMoveError):
+        move = _resolve_san_or_unique_destination(board, token)
+        if move is None:
             break
         legal.append(board.san(move))
         board.push(move)
     return legal
 
-
 def parse_moves(snapshot: dict) -> list[str]:
-    """Prefer per-move notation nodes, validating them as one continuous game."""
+    """Prefer individual notation nodes; resolve missing piece glyphs only if unambiguous."""
     direct = snapshot.get("directMoves") or []
     direct_moves: list[str] = []
     direct_failed = False
@@ -461,12 +497,9 @@ def parse_moves(snapshot: dict) -> list[str]:
         board = chess.Board()
         for candidate in direct:
             found = _candidate_tokens(candidate.get("text", ""))
-            if not found:
-                continue
             for token in found:
-                try:
-                    move = board.parse_san(token)
-                except (ValueError, chess.IllegalMoveError, chess.AmbiguousMoveError):
+                move = _resolve_san_or_unique_destination(board, token)
+                if move is None:
                     direct_failed = True
                     break
                 direct_moves.append(board.san(move))
@@ -483,13 +516,9 @@ def parse_moves(snapshot: dict) -> list[str]:
         if len(legal) > len(best_generic):
             best_generic = legal
 
-    # A clean direct sequence wins ties. If any direct node is malformed, compare
-    # its legal prefix with the broad-list fallback instead of trusting it blindly.
     if direct_moves and not direct_failed and len(direct_moves) >= len(best_generic):
         return direct_moves
-    if len(direct_moves) > len(best_generic):
-        return direct_moves
-    return best_generic
+    return direct_moves if len(direct_moves) > len(best_generic) else best_generic
 
 def get_clocks(snapshot: dict) -> tuple[str, str]:
     """Backwards-compatible ordered clock values for polling-change detection."""
@@ -543,34 +572,73 @@ def get_player_details(snapshot: dict) -> dict[str, str]:
         username_matches = bool(CHESSCOM_USERNAME and username == CHESSCOM_USERNAME)
         if side in ("White", "Black") and (player.get("isYou") or username_matches):
             result["your_side"] = side
+
+    # Bottom clock belongs to the local player when active-game controls are visible.
+    if not result["your_side"] and snapshot.get("activeControls"):
+        for clock in snapshot.get("clocks", []):
+            context = str(clock.get("context", "")).lower()
+            if "player-bottom" in context or "clock-bottom" in context:
+                side = str(clock.get("side", ""))
+                if side in ("White", "Black"):
+                    result["your_side"] = side
+                    break
     return result
 
 def move_times_by_ply(snapshot: dict, total_moves: int) -> dict[int, float]:
-    """Read only explicit time annotations tied to a data-ply node."""
-    records = snapshot.get("moveTimes", [])
+    """Read explicit per-ply DOM times, then the durations printed in move-list rows."""
     found: dict[int, float] = {}
     numeric_plies = []
-    for item in records:
+    for item in snapshot.get("moveTimes", []):
         try:
             ply = int(str(item.get("ply", "")).strip())
-        except (TypeError, ValueError):
-            continue
-        seconds = item.get("seconds")
-        if seconds is None:
-            continue
-        try:
-            seconds = float(seconds)
+            seconds = float(item.get("seconds"))
         except (TypeError, ValueError):
             continue
         if 0 <= ply <= max(total_moves, 250):
             numeric_plies.append(ply)
             found[ply] = seconds
-    # Some DOMs number data-ply from zero; shift only when the first mapped ply is zero.
     if numeric_plies and min(numeric_plies) == 0 and 1 not in found:
         found = {ply + 1: seconds for ply, seconds in found.items()}
-    # Never assign a displayed duration to an unrelated ply based on list order.
-    return {ply: seconds for ply, seconds in found.items() if 1 <= ply <= total_moves}
 
+    candidates = [
+        item for item in snapshot.get("moveTexts", [])
+        if item.get("text")
+        and re.search(r"(?<!\S)\d+\.\s+", item.get("text", ""))
+        and re.search(r"(?<![\w.])\d+(?:[.,]\d+)?s\b", item.get("text", ""), re.I)
+    ]
+    if candidates:
+        full_list = max(
+            candidates,
+            key=lambda item: (item.get("selector") == "wc-simple-move-list", len(item.get("text", "")))
+        )
+        text = str(full_list.get("text", ""))
+        headings = list(re.finditer(r"(?<!\S)(\d+)\.\s+", text))
+        for index, heading in enumerate(headings):
+            try:
+                move_number = int(heading.group(1))
+            except ValueError:
+                continue
+            if move_number < 1 or move_number > 250:
+                continue
+            row_end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
+            row = text[heading.end():row_end].strip()
+            times = [
+                float(m.group(1).replace(",", "."))
+                for m in re.finditer(r"(?<![\w.])(\d+(?:[.,]\d+)?)s\b", row, re.I)
+            ]
+            if not times:
+                continue
+            first_time = re.search(r"(?<![\w.])\d+(?:[.,]\d+)?s\b", row, re.I)
+            moves_part = row[:first_time.start()] if first_time else row
+            tokens = _candidate_tokens(moves_part)
+            white_ply = (move_number - 1) * 2 + 1
+            black_ply = white_ply + 1
+            if tokens and len(times) >= 1:
+                found.setdefault(white_ply, times[0])
+            if len(tokens) >= 2 and len(times) >= 2:
+                found.setdefault(black_ply, times[1])
+
+    return {ply: seconds for ply, seconds in found.items() if 1 <= ply <= total_moves}
 
 def clock_context(snapshot: dict, moves: list[str]) -> dict[str, str]:
     clocks = get_clock_details(snapshot)
@@ -713,22 +781,24 @@ def main() -> None:
                 result_visible_streak = 0
 
             if os.environ.get("CHESS_DOM_DEBUG") == "1":
+                ctx_dbg = event_context(snapshot, moves)
                 signature = repr({
-                    "directSelector": snapshot.get("directMoveSelector"),
-                    "directMoves": [x.get("text", "") for x in snapshot.get("directMoves", [])[:50]],
-                    "moveTimes": snapshot.get("moveTimes", [])[:30],
-                    "clocks": snapshot.get("clocks", []),
-                    "players": snapshot.get("players", []),
-                    "turn": snapshot.get("domTurn"),
-                    "pieces": snapshot.get("boardPieces", [])[:8],
+                    "directCount": len(snapshot.get("directMoves", [])),
+                    "directTail": [x.get("text", "") for x in snapshot.get("directMoves", [])[-8:]],
+                    "parsedMoves": len(moves),
+                    "timeValues": len(dom_move_times),
+                    "clockSides": [x.get("side", "") for x in snapshot.get("clocks", [])],
+                    "playerNames": [x.get("username") or x.get("name") for x in snapshot.get("players", [])[:3]],
+                    "turn": ctx_dbg["side_to_move"],
+                    "pieceCount": len(snapshot.get("boardPieces", [])),
                 })
                 if signature != last_debug_signature:
-                    print("[DOM DEBUG] structured visible DOM:", signature[:6000])
-                    if snapshot.get("moveTexts"):
-                        print("[DOM DEBUG] generic fallback:", repr([
-                            (item.get("selector"), item.get("text", "")[:180])
-                            for item in snapshot["moveTexts"][:8]
-                        ]))
+                    print(
+                        f"[DOM] parsed={len(moves)} direct={len(snapshot.get('directMoves', []))} "
+                        f"times={len(dom_move_times)} clocks=W:{ctx_dbg['white_clock'] or '?'} "
+                        f"B:{ctx_dbg['black_clock'] or '?'} turn={ctx_dbg['side_to_move'] or '?'} "
+                        f"pieces={len(snapshot.get('boardPieces', []))}"
+                    )
                     last_debug_signature = signature
 
             ticked = False
