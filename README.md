@@ -48,13 +48,13 @@ A local demo page opens. Click **Apply next move**; the Python terminal should p
 
 ## Inspect a browser page's visible DOM
 
-To see which board/piece/move-list elements are actually exposed on the target test page, run:
+To see which board/piece/move-list elements are actually exposed on the target test page, run (this uses a separate Chromium profile, so you may need to sign in once):
 
 ```bat
 python inspect_chess_dom.py
 ```
 
-Sign in if needed, start/open the test game, wait for the board and move list, then return to the terminal and press Enter. It prints candidate DOM elements and installs a `MutationObserver` that logs relevant board/piece/move-list changes. Make one move and inspect the output. It only inspects browser DOM; it does not inspect network traffic or private endpoints. Stop it with Ctrl+C.
+Sign in if needed, start/open the test game, wait for the board and move list, then return to the terminal and press Enter. It prints candidate DOM elements and installs a `MutationObserver` that logs relevant board/piece/move-list changes. Make one move and inspect the output. It uses bounded DOM queries to avoid exhaustively traversing a large page. It only inspects browser DOM; it does not inspect network traffic or private endpoints. Stop it with Ctrl+C.
 
 ## Important implementation note
 
