@@ -36,7 +36,7 @@ The browser profile is saved in `playwright_chess_profile/`. Use a local or othe
 
 ## Event-driven DOM/FEN experiment
 
-A separate proof-of-concept shows how an owned test page can publish a complete FEN and move metadata for each committed move. Playwright listens for a `chess:position` custom event (the preferred path) and uses a `MutationObserver` as a fallback, rather than repeatedly screenshotting the board.
+A separate proof-of-concept shows how an owned test page can publish a complete FEN and move metadata for each committed move. Playwright listens for a `chess:position` custom event and uses a `MutationObserver` as a fallback, rather than repeatedly screenshotting the board.
 
 Run:
 
@@ -46,14 +46,16 @@ python dom_event_watcher.py
 
 A local demo page opens. Click **Apply next move**; the Python terminal should print the new ply, actor, move and validated FEN. The watcher observes `[data-chess-board]` and its `data-fen` attribute, and reads the visible move list from `[data-move-list]`.
 
-For another local/authorized page that explicitly exposes the same kind of state, options can be changed, for example:
+## Inspect a browser page's visible DOM
+
+To see which board/piece/move-list elements are actually exposed on the target test page, run:
 
 ```bat
-python dom_event_watcher.py --url http://127.0.0.1:8000/board --board-selector "[data-chess-board]" --fen-attribute data-fen --moves-selector "[data-move-list]"
+python inspect_chess_dom.py
 ```
 
-This watcher does not inspect network traffic or private backend endpoints. It can only read state the page actually exposes in its DOM. If a page does not expose a complete, reliable FEN, the watcher cannot infer it from this attribute contract alone.
+Sign in if needed, start/open the test game, wait for the board and move list, then return to the terminal and press Enter. It prints candidate DOM elements and installs a `MutationObserver` that logs relevant board/piece/move-list changes. Make one move and inspect the output. It only inspects browser DOM; it does not inspect network traffic or private endpoints. Stop it with Ctrl+C.
 
 ## Important implementation note
 
-The DOM watcher is currently a separate test experiment. `main_playwright.py` still uses screenshots and OpenCV; it has not yet been converted to consume DOM events. Full end-to-end testing has not been completed in this environment.
+The DOM watcher is currently a separate test experiment. `main_playwright.py` still uses screenshots and OpenCV; it has not yet been converted to consume DOM events. The diagnostic output must first show whether the target page exposes enough reliable position or move-history state to support such a conversion. Full end-to-end testing has not been completed in this environment.
