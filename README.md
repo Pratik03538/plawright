@@ -18,7 +18,7 @@ python .\start_hikaru_game.py
 
 The username defaults to `diamond_membership-free`. On the first run, the script asks for the password with hidden input; it does not store the password in source code. The dedicated browser profile keeps the login session between runs and is excluded from Git. If Chess.com presents a CAPTCHA or extra verification, finish it in the opened Chrome window and press Enter in the terminal.
 
-The script opens `https://www.chess.com/play/computer/hikaru`, verifies that the page is Hikaru's bot page, and clicks **Play** if it finds the main start button. It does not make any chess moves. Keep the terminal running while you use the separate Chrome window; press Enter in the terminal to close that Playwright window.
+The script opens `https://www.chess.com/play/computer/Hikaru-bot`, requires that exact Hikaru URL before clicking, and ignores the general bot-picker navigation link. It does not make any chess moves. Keep the terminal running while you use the separate Chrome window; press Enter in the terminal to close that Playwright window.
 
 
 ## Browser mode: reuse your existing Chrome window
