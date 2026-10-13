@@ -29,7 +29,7 @@
 <main>
   <section>
     <h1>Local event-driven chess test board</h1>
-    <p>This owned test page publishes a complete FEN and move metadata in DOM attributes. The Python watcher receives updates from a MutationObserver, without screenshots or grid calibration.</p>
+    <p>This owned test page publishes a complete FEN and move metadata in DOM attributes. The Python watcher receives one custom event per committed move, with a MutationObserver fallback, without screenshots or grid calibration.</p>
     <div id="board" data-chess-board data-fen="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" data-ply="0" data-last-move="" data-actor="initial" aria-label="Chess board"></div>
     <button id="next">Apply next move</button>
     <button id="reset" style="margin-left:8px;background:#d4dce6">Reset sequence</button>
@@ -93,6 +93,9 @@
     lastEl.textContent = state.ply ? state.actor + ' played ' + state.lastMove : 'No move yet';
     statusEl.textContent = state.ply ? 'Position updated in the DOM. Check the Python terminal for the matching event.' : 'Ready. Run python dom_event_watcher.py and click the move button.';
     document.getElementById('next').disabled = index >= states.length - 1;
+    document.dispatchEvent(new CustomEvent('chess:position', {detail: {
+      fen: state.fen, ply: state.ply, lastMove: state.lastMove, actor: state.actor, moves: state.moves
+    }}));
   }
   document.getElementById('next').addEventListener('click', () => {
     if (index < states.length - 1) index++;
