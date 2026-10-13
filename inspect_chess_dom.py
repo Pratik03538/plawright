@@ -7,14 +7,17 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 BASE_DIR = Path(__file__).resolve().parent
-# Separate profile avoids Chromium profile-lock conflicts with main_playwright.py.
-PROFILE_DIR = BASE_DIR / "playwright_dom_inspector_profile"
+# Use branded Chrome in its own profile (never point at your everyday Chrome profile).
+# Override with CHESS_BROWSER_CHANNEL=chromium if you want the bundled Playwright build.
+BROWSER_CHANNEL = os.environ.get("CHESS_BROWSER_CHANNEL", "chrome").strip() or "chrome"
+PROFILE_DIR = BASE_DIR / "playwright_dom_inspector_chrome_profile"
 TARGET_URL = os.environ.get("CHESS_BOT_URL", "https://www.chess.com/play/computer")
 
 DOM_SNAPSHOT_JS = r"""() => {
@@ -168,6 +171,7 @@ def main() -> None:
     with sync_playwright() as playwright:
         context = playwright.chromium.launch_persistent_context(
             user_data_dir=str(PROFILE_DIR),
+            channel=BROWSER_CHANNEL,
             headless=False,
             no_viewport=True,
             args=["--start-maximized"],
@@ -175,6 +179,47 @@ def main() -> None:
         try:
             page = context.pages[0] if context.pages else context.new_page()
             page.set_default_timeout(10000)
+            print(f"[DOM INSPECTOR] Browser channel: {BROWSER_CHANNEL}")
+            print(f"[DOM INSPECTOR] Dedicated profile: {PROFILE_DIR}")
+
+            # Diagnostic-only network logging: redact query strings/fragments so
+            # session tokens and other URL parameters are not printed.
+            net_counts = {"failed": 0, "http_error": 0}
+
+            def safe_url(url: str) -> str:
+                parts = urlsplit(url)
+                return f"{parts.scheme}://{parts.netloc}{parts.path}"
+
+            def on_request_failed(request) -> None:
+                if net_counts["failed"] >= 25:
+                    return
+                net_counts["failed"] += 1
+                print(
+                    f"[NET FAIL] {request.method} {safe_url(request.url)} "
+                    f"| {request.failure or 'no failure detail'}"
+                )
+
+            def on_response(response) -> None:
+                if response.status < 400 or net_counts["http_error"] >= 25:
+                    return
+                net_counts["http_error"] += 1
+                print(f"[HTTP {response.status}] {safe_url(response.url)}")
+
+            def on_websocket(websocket) -> None:
+                safe_ws_url = safe_url(websocket.url)
+                print(f"[WS OPEN] {safe_ws_url}")
+                websocket.on(
+                    "socketerror",
+                    lambda error: print(f"[WS ERROR] {safe_ws_url} | {error}"),
+                )
+                websocket.on(
+                    "close",
+                    lambda _: print(f"[WS CLOSE] {safe_ws_url}"),
+                )
+
+            page.on("requestfailed", on_request_failed)
+            page.on("response", on_response)
+            page.on("websocket", on_websocket)
             page.on("crash", lambda _: print("[ERROR] Chromium renderer crashed. Restart the inspector and try again."))
             page.on("close", lambda _: print("[WARN] Browser page was closed."))
             context.on("close", lambda _: print("[WARN] Chromium context closed."))
