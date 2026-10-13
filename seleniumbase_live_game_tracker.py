@@ -851,7 +851,8 @@ def main() -> None:
                     "note": "Explicit game-result container remained visible for 3 polls"
                 })
                 completed_game_urls.add(active_game["url"])
-                print("[GAME END] Result stayed visible; game marked finished.")
+                result_label = str(snapshot.get("resultText") or "result text not exposed by DOM").replace("\\n", " ").strip()[:120]
+                print(f"[GAME END] {result_label}")
                 active_game, last_moves = None, []
 
             if active_game and (
