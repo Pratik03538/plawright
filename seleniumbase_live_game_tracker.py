@@ -716,11 +716,9 @@ def num_clock(value: str) -> float | None:
 
 def main() -> None:
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    print("[START] SeleniumBase normal Chrome mode + read-only Chess.com tracker.")
-    print("[INFO] Profile:", PROFILE_DIR)
-    print("[INFO] CSV:", LOG_FILE)
-    print("[INFO] Browser will open blank. Open Chess.com and start your game manually.")
-    print("[INFO] DOM-only/read-only. Captures visible clocks, move annotations, players, turn, result, and piece metadata. No clicks or chess moves. Stop: Ctrl+C.")
+    print("[START] Read-only Chess.com tracker.")
+    print("[CSV]", LOG_FILE)
+    print("[WAIT] Open a Chess.com game in the Chrome window. Stop with Ctrl+C.")
 
     try:
         driver = Driver(
@@ -747,8 +745,6 @@ def main() -> None:
     result_visible_streak = 0
     completed_game_urls: set[str] = set()
     last_debug_signature = ""
-    last_clock_log_signature: tuple[str, ...] = ()
-    last_clock_log_mono = 0.0
 
     try:
         while True:
@@ -775,7 +771,7 @@ def main() -> None:
                     continue
 
             if snapshot is None:
-                if time.monotonic() - last_wait_message > 10:
+                if time.monotonic() - last_wait_message > 30:
                     print("[WAIT] Chess.com game DOM ka wait. Chrome mein game manually open/start karo.")
                     last_wait_message = time.monotonic()
                 time.sleep(POLL_SECONDS)
@@ -793,7 +789,7 @@ def main() -> None:
             else:
                 result_visible_streak = 0
 
-            if os.environ.get("CHESS_DOM_DEBUG") == "1":
+            if os.environ.get("CHESS_DOM_DEBUG", "").lower() == "verbose":
                 ctx_dbg = event_context(snapshot, moves)
                 signature = repr({
                     "directCount": len(snapshot.get("directMoves", [])),
@@ -897,29 +893,6 @@ def main() -> None:
                 warned_move_list = False
 
             if active_game:
-                ctx_now = event_context(snapshot, moves)
-                live_signature = (
-                    ctx_now["white_clock"], ctx_now["black_clock"], ctx_now["clock_1"], ctx_now["clock_2"],
-                    ctx_now["side_to_move"], ctx_now["white_player"], ctx_now["black_player"],
-                    ctx_now["move_count"], ctx_now["game_status"]
-                )
-                if live_signature != last_clock_log_signature and mono - last_clock_log_mono >= 0.9:
-                    append_csv({
-                        "event": "CLOCK", "game_id": active_game["id"], "game_url": active_game["url"],
-                        "game_started_at": active_game["started_at"], "move_observed_at": now, **ctx_now,
-                        "note": "Visible DOM clock/board snapshot; remaining time is the displayed clock value"
-                    })
-                    print(
-                        f"[CLOCK] White {ctx_now['white_clock'] or 'unmapped'} | "
-                        f"Black {ctx_now['black_clock'] or 'unmapped'} | "
-                        f"clock-order {ctx_now['clock_1'] or '?'} / {ctx_now['clock_2'] or '?'} | "
-                        f"you {ctx_now['your_clock'] or '?'} / opponent {ctx_now['opponent_clock'] or '?'} | "
-                        f"turn {ctx_now['side_to_move'] or '?'} | moves {ctx_now['move_count']} | "
-                        f"pieces {len(snapshot.get('boardPieces', []))}"
-                    )
-                    last_clock_log_signature = live_signature
-                    last_clock_log_mono = mono
-
                 if len(moves) > len(last_moves) and moves[:len(last_moves)] == last_moves:
                     added = moves[len(last_moves):]
                     c1, c2 = get_clocks(snapshot)
@@ -941,7 +914,7 @@ def main() -> None:
                             "note": "Exact displayed per-move duration from DOM" if dom_seconds is not None else "Displayed per-move duration not found; poll interval is only an estimate"
                         })
                         duration_label = f"DOM {dom_seconds:.2f}s" if dom_seconds is not None else f"~{elapsed:.2f}s estimate"
-                        print(f"[MOVE] {side} {added[0]} | {duration_label} | White {ctx['white_clock'] or '?'} / Black {ctx['black_clock'] or '?'} | turn {ctx['side_to_move'] or '?'}")
+                        print(f"[MOVE] {side} {added[0]} | {duration_label} | You {ctx['your_clock'] or '?'} / Opp {ctx['opponent_clock'] or '?'} | turn {ctx['side_to_move'] or '?'}")
                         last_move_time = mono
                     else:
                         for offset, move in enumerate(added, start=1):
