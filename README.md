@@ -36,7 +36,7 @@ The browser profile is saved in `playwright_chess_profile/`. Use a local or othe
 
 ## Event-driven DOM/FEN experiment
 
-A separate proof-of-concept shows how an owned test page can publish a complete FEN in a DOM attribute and how Playwright can receive updates through a `MutationObserver`, rather than repeatedly screenshotting the board.
+A separate proof-of-concept shows how an owned test page can publish a complete FEN and move metadata for each committed move. Playwright listens for a `chess:position` custom event (the preferred path) and uses a `MutationObserver` as a fallback, rather than repeatedly screenshotting the board.
 
 Run:
 
