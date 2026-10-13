@@ -6,6 +6,7 @@ bounded DOM queries so large pages are not exhaustively traversed.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from playwright.sync_api import Error as PlaywrightError
@@ -13,7 +14,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 BASE_DIR = Path(__file__).resolve().parent
-# Launch installed Chrome normally with a dedicated profile, then attach Playwright over CDP.
+# Attach to the already-open Chrome instance via its user-approved CDP endpoint.
 # This avoids Playwright's normal launch arguments when diagnosing site/game startup.
 PROFILE_DIR = BASE_DIR / "playwright_dom_clean_chrome_profile"
 TARGET_URL = os.environ.get("CHESS_BOT_URL", "https://www.chess.com/play/computer")
