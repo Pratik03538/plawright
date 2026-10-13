@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.idea/
+playwright_chess_profile/
+stockfish.exe
+Ultimate_GM_Bullet.bin
