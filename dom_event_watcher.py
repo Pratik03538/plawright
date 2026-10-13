@@ -1,7 +1,7 @@
 """Event-driven DOM/FEN watcher for a local or otherwise authorized chess test page.
 
-The page must expose a board element with a data-fen attribute (or a configurable
-attribute) and may expose move metadata via data-ply, data-last-move, data-actor.
+The page may publish a complete FEN through a declared DOM attribute and can
+optionally dispatch a 'chess:position' CustomEvent for every committed move.
 This intentionally does not inspect network traffic or private backend endpoints.
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ from playwright.sync_api import sync_playwright
 
 
 def build_observer_script(board_selector: str, fen_attribute: str, moves_selector: str) -> str:
-    """Create an early-injected MutationObserver for a declared DOM contract."""
+    """Create an early-injected event listener plus MutationObserver fallback."""
     return f"""(() => {{
       const BOARD_SELECTOR = {json.dumps(board_selector)};
       const FEN_ATTRIBUTE = {json.dumps(fen_attribute)};
@@ -23,28 +23,45 @@ def build_observer_script(board_selector: str, fen_attribute: str, moves_selecto
       let lastKey = null;
       let observer = null;
 
+      function emit(payload) {{
+        if (!payload || !payload.fen) return;
+        payload.url = payload.url || location.href;
+        const key = [payload.fen, payload.ply || '', payload.lastMove || '', payload.actor || ''].join('|');
+        if (key === lastKey) return;
+        lastKey = key;
+        if (typeof window.onChessDomUpdate === 'function') {{
+          window.onChessDomUpdate(payload);
+        }}
+      }}
+
       function snapshot() {{
         const boardEl = document.querySelector(BOARD_SELECTOR);
         if (!boardEl) return;
         const fen = boardEl.getAttribute(FEN_ATTRIBUTE);
         if (!fen) return;
-
-        const payload = {{
+        emit({{
           fen,
           ply: boardEl.getAttribute('data-ply') || '',
           lastMove: boardEl.getAttribute('data-last-move') || '',
           actor: boardEl.getAttribute('data-actor') || '',
           moves: document.querySelector(MOVES_SELECTOR)?.textContent?.trim() || '',
           url: location.href
-        }};
-        const key = [payload.fen, payload.ply, payload.lastMove, payload.actor].join('|');
-        if (key === lastKey) return;
-        lastKey = key;
-
-        if (typeof window.onChessDomUpdate === 'function') {{
-          window.onChessDomUpdate(payload);
-        }}
+        }});
       }}
+
+      // Controlled pages can emit one payload per committed move. This event
+      // path preserves each supplied state even if several updates happen fast.
+      document.addEventListener('chess:position', (event) => {{
+        const detail = event.detail || {{}};
+        emit({{
+          fen: detail.fen,
+          ply: detail.ply,
+          lastMove: detail.lastMove,
+          actor: detail.actor,
+          moves: detail.moves || document.querySelector(MOVES_SELECTOR)?.textContent?.trim() || '',
+          url: location.href
+        }});
+      }});
 
       function install() {{
         if (!document.documentElement) return;
@@ -95,7 +112,7 @@ def main() -> None:
         ply = payload.get("ply") or "?"
         last_move = payload.get("lastMove") or "—"
         moves = payload.get("moves") or "(move list not exposed)"
-        print(f"\\n[DOM EVENT] ply={ply} | actor={actor} | last_move={last_move}")
+        print(f"\n[DOM EVENT] ply={ply} | actor={actor} | last_move={last_move}")
         print(f"[MOVE LIST] {moves}")
         print(f"[FEN] {board.fen()}")
         print("[SYNC] Valid chess position received; no screenshot/grid scan used.")
@@ -117,7 +134,7 @@ def main() -> None:
             browser.close()
             raise SystemExit(f"Could not open {args.url}: {exc}") from exc
 
-        print("[WATCHER] Listening for DOM position changes; no timed scan loop is used.")
+        print("[WATCHER] Listening for position events and DOM changes; no timed scan loop is used.")
         print("[WATCHER] In the local demo, click 'Apply next move' to trigger an event.")
         print("[WATCHER] Close the browser window or press Ctrl+C here to exit.")
         try:
