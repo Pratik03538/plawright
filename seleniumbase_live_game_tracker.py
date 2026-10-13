@@ -447,12 +447,12 @@ def _legal_prefix(candidates: list[str]) -> list[str]:
 
 
 def parse_moves(snapshot: dict) -> list[str]:
-    """Prefer per-move notation nodes and validate them as one continuous game."""
+    """Prefer per-move notation nodes, validating them as one continuous game."""
     direct = snapshot.get("directMoves") or []
+    direct_moves: list[str] = []
+    direct_failed = False
     if direct:
         board = chess.Board()
-        direct_moves: list[str] = []
-        failed = False
         for candidate in direct:
             found = _candidate_tokens(candidate.get("text", ""))
             if not found:
@@ -461,15 +461,12 @@ def parse_moves(snapshot: dict) -> list[str]:
                 try:
                     move = board.parse_san(token)
                 except (ValueError, chess.IllegalMoveError, chess.AmbiguousMoveError):
-                    failed = True
+                    direct_failed = True
                     break
                 direct_moves.append(board.san(move))
                 board.push(move)
-            if failed:
+            if direct_failed:
                 break
-        # If direct notation nodes begin at the start of the game, this is the trusted sequence.
-        if len(direct_moves) >= 2 or (direct_moves and not snapshot.get("moveTexts")):
-            return direct_moves
 
     best_generic: list[str] = []
     for candidate in snapshot.get("moveTexts", []):
@@ -479,10 +476,13 @@ def parse_moves(snapshot: dict) -> list[str]:
         legal = _legal_prefix(found)
         if len(legal) > len(best_generic):
             best_generic = legal
-    if direct:
-        # Preserve a short, valid direct prefix rather than returning an unrelated parent-text parse.
-        if len(direct_moves) >= len(best_generic):
-            return direct_moves
+
+    # A clean direct sequence wins ties. If any direct node is malformed, compare
+    # its legal prefix with the broad-list fallback instead of trusting it blindly.
+    if direct_moves and not direct_failed and len(direct_moves) >= len(best_generic):
+        return direct_moves
+    if len(direct_moves) > len(best_generic):
+        return direct_moves
     return best_generic
 
 def get_clocks(snapshot: dict) -> tuple[str, str]:
