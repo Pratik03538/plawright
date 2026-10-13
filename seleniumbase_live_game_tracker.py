@@ -40,6 +40,7 @@ PROFILE_DIR = BASE_DIR / ".normal_chrome_profile"
 PORT_FILE = PROFILE_DIR / "DevToolsActivePort"
 LOG_FILE = BASE_DIR / "chesscom_live_moves_seleniumbase.csv"
 POLL_SECONDS = 0.35
+CHESSCOM_USERNAME = os.environ.get("CHESSCOM_USERNAME", "").strip().casefold()
 
 CHROME_CANDIDATES = [
     Path(os.environ.get("PROGRAMFILES", r"C:\Program Files"))
@@ -171,7 +172,12 @@ SNAPSHOT_JS = r"""return (() => {
         parts.push(String(cur.getAttribute && cur.getAttribute('data-cy') || ''));
         parts.push(String(cur.getAttribute && cur.getAttribute('data-testid') || ''));
         parts.push(String(cur.getAttribute && cur.getAttribute('title') || ''));
-        cur = cur.parentElement;
+        if (cur.parentElement) {
+          cur = cur.parentElement;
+        } else {
+          const ownerRoot = cur.getRootNode && cur.getRootNode();
+          cur = ownerRoot && ownerRoot.host ? ownerRoot.host : null;
+        }
       } catch (_) { break; }
     }
     return norm(parts.join(' '));
@@ -341,8 +347,8 @@ CSV_FIELDS = [
     "time_taken_seconds_estimate", "move_time_seconds_dom", "time_source",
     "move_observed_at", "clock_1", "clock_2", "white_clock", "black_clock",
     "your_clock", "opponent_clock", "side_to_move", "white_player", "black_player",
-    "move_count", "last_move", "game_status", "board_pieces_json",
-    "highlighted_squares_json", "note"
+    "move_count", "last_move", "game_status", "board_orientation", "board_size",
+    "board_pieces_json", "highlighted_squares_json", "note"
 ]
 
 def now_iso() -> str:
@@ -608,6 +614,8 @@ def event_context(snapshot: dict, moves: list[str]) -> dict[str, str]:
         "move_count": str(len(moves)),
         "last_move": moves[-1] if moves else "",
         "game_status": game_status(snapshot),
+        "board_orientation": str(snapshot.get("orientation") or ""),
+        "board_size": json.dumps(snapshot.get("boardSize") or []),
         "board_pieces_json": board_json(snapshot, "boardPieces"),
         "highlighted_squares_json": board_json(snapshot, "highlightedSquares"),
     }
