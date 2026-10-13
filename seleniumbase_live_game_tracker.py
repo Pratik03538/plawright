@@ -485,6 +485,12 @@ def parse_moves(snapshot: dict) -> list[str]:
             return direct_moves
     return best_generic
 
+def get_clocks(snapshot: dict) -> tuple[str, str]:
+    """Backwards-compatible ordered clock values for polling-change detection."""
+    clocks = get_clock_details(snapshot)
+    return clocks["clock_1"], clocks["clock_2"]
+
+
 def get_clock_details(snapshot: dict) -> dict[str, str]:
     values = snapshot.get("clocks", [])
     result = {"clock_1": "", "clock_2": "", "white_clock": "", "black_clock": ""}
@@ -812,8 +818,9 @@ def main() -> None:
                         "note": "Visible DOM clock/board snapshot; remaining time is the displayed clock value"
                     })
                     print(
-                        f"[CLOCK] White {ctx_now['white_clock'] or ctx_now['clock_1'] or '?'} | "
-                        f"Black {ctx_now['black_clock'] or ctx_now['clock_2'] or '?'} | "
+                        f"[CLOCK] White {ctx_now['white_clock'] or 'unmapped'} | "
+                        f"Black {ctx_now['black_clock'] or 'unmapped'} | "
+                        f"clock-order {ctx_now['clock_1'] or '?'} / {ctx_now['clock_2'] or '?'} | "
                         f"you {ctx_now['your_clock'] or '?'} / opponent {ctx_now['opponent_clock'] or '?'} | "
                         f"turn {ctx_now['side_to_move'] or '?'} | moves {ctx_now['move_count']} | "
                         f"pieces {len(snapshot.get('boardPieces', []))}"
