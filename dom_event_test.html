@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local Event-Driven Chess Test Board</title>
+<style>
+  :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #10151c; color: #edf2f7; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px; }
+  main { width: min(100%, 900px); margin: 0 auto; display: grid; grid-template-columns: minmax(260px, 440px) minmax(220px, 1fr); gap: 24px; align-items: start; }
+  h1 { font-size: 1.35rem; margin: 0 0 8px; }
+  p { color: #b8c3d1; line-height: 1.45; }
+  #board { display: grid; grid-template-columns: repeat(8, 1fr); aspect-ratio: 1; border: 3px solid #c4cdd8; border-radius: 5px; overflow: hidden; }
+  .square { display: flex; align-items: center; justify-content: center; font-size: clamp(24px, 5vw, 42px); user-select: none; }
+  .light { background: #e4e9e7; color: #17202b; }
+  .dark { background: #587968; color: #fff; }
+  button { margin-top: 14px; border: 0; border-radius: 8px; padding: 11px 15px; color: #0a1118; background: #91dbba; font-weight: 700; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  .panel { background: #1b2531; border: 1px solid #344255; border-radius: 12px; padding: 16px; overflow-wrap: anywhere; }
+  .label { text-transform: uppercase; letter-spacing: .08em; font-size: .74rem; color: #a7b6c7; }
+  #moves { min-height: 50px; font-size: 1.05rem; margin-top: 6px; }
+  #last { margin: 5px 0 15px; font-weight: 650; }
+  code { color: #b5e8d0; font-size: .82rem; }
+  @media (max-width: 680px) { body { padding: 14px; } main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <section>
+    <h1>Local event-driven chess test board</h1>
+    <p>This owned test page publishes a complete FEN and move metadata in DOM attributes. The Python watcher receives updates from a MutationObserver, without screenshots or grid calibration.</p>
+    <div id="board" data-chess-board data-fen="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" data-ply="0" data-last-move="" data-actor="initial" aria-label="Chess board"></div>
+    <button id="next">Apply next move</button>
+    <button id="reset" style="margin-left:8px;background:#d4dce6">Reset sequence</button>
+  </section>
+  <aside class="panel">
+    <div class="label">Move list exposed in DOM</div>
+    <div id="moves" data-move-list>(starting position)</div>
+    <div class="label" style="margin-top:16px">Latest update</div>
+    <div id="last">No move yet</div>
+    <div class="label">FEN</div>
+    <p><code id="fenText">rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1</code></p>
+    <p id="status">Ready. Run <code>python dom_event_watcher.py</code> and click the move button.</p>
+  </aside>
+</main>
+<script>
+(() => {
+  const startFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+  const states = [
+    {fen: startFen, ply: 0, lastMove: '', actor: 'initial', moves: '(starting position)'},
+    {fen: 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1', ply: 1, lastMove: 'e2e4', actor: 'human', moves: '1. e4'},
+    {fen: 'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2', ply: 2, lastMove: 'e7e5', actor: 'engine', moves: '1. e4 e5'},
+    {fen: 'rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2', ply: 3, lastMove: 'g1f3', actor: 'human', moves: '1. e4 e5 2. Nf3'},
+    {fen: 'r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3', ply: 4, lastMove: 'b8c6', actor: 'engine', moves: '1. e4 e5 2. Nf3 Nc6'}
+  ];
+  const pieces = {K:'♔', Q:'♕', R:'♖', B:'♗', N:'♘', P:'♙', k:'♚', q:'♛', r:'♜', b:'♝', n:'♞', p:'♟'};
+  const boardEl = document.getElementById('board');
+  const movesEl = document.getElementById('moves');
+  const fenText = document.getElementById('fenText');
+  const lastEl = document.getElementById('last');
+  const statusEl = document.getElementById('status');
+  let index = 0;
+
+  function parseFen(fen) {
+    const ranks = fen.split(' ')[0].split('/');
+    const cells = [];
+    for (const rank of ranks) {
+      for (const char of rank) {
+        if (/^[1-8]$/.test(char)) {
+          for (let i = 0; i < Number(char); i++) cells.push('');
+        } else cells.push(char);
+      }
+    }
+    return cells;
+  }
+  function render(state) {
+    const cells = parseFen(state.fen);
+    boardEl.innerHTML = '';
+    cells.forEach((piece, i) => {
+      const square = document.createElement('div');
+      const row = Math.floor(i / 8), col = i % 8;
+      square.className = 'square ' + ((row + col) % 2 === 0 ? 'light' : 'dark');
+      square.textContent = pieces[piece] || '';
+      boardEl.appendChild(square);
+    });
+    boardEl.setAttribute('data-fen', state.fen);
+    boardEl.setAttribute('data-ply', String(state.ply));
+    boardEl.setAttribute('data-last-move', state.lastMove);
+    boardEl.setAttribute('data-actor', state.actor);
+    movesEl.textContent = state.moves;
+    fenText.textContent = state.fen;
+    lastEl.textContent = state.ply ? state.actor + ' played ' + state.lastMove : 'No move yet';
+    statusEl.textContent = state.ply ? 'Position updated in the DOM. Check the Python terminal for the matching event.' : 'Ready. Run python dom_event_watcher.py and click the move button.';
+    document.getElementById('next').disabled = index >= states.length - 1;
+  }
+  document.getElementById('next').addEventListener('click', () => {
+    if (index < states.length - 1) index++;
+    render(states[index]);
+  });
+  document.getElementById('reset').addEventListener('click', () => {
+    index = 0;
+    render(states[index]);
+  });
+  render(states[index]);
+})();
+</script>
+</body>
+</html>
