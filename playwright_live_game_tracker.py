@@ -39,10 +39,12 @@ SAN_PATTERN = re.compile(
     r"[KQRBN]?[a-h]?[1-8]?x?[a-h][1-8](?:=[QRBN])?[+#]?[!?]*)"
     r"(?![A-Za-z0-9])"
 )
-FIGURINE_MAP = str.maketrans({
-    "♔": "K", "♕": "Q", "♖": "R", "♗": "B", "♘": "N", "♙": "",
-    "♚": "K", "♛": "Q", "♜": "R", "♝": "B", "♞": "N", "♟": "",
-})
+# Use Unicode code points rather than literal chess symbols here. This avoids
+# Windows PowerShell code-page corruption when downloading the file via a pipe.
+FIGURINE_MAP = {
+    0x2654: "K", 0x2655: "Q", 0x2656: "R", 0x2657: "B", 0x2658: "N", 0x2659: "",
+    0x265A: "K", 0x265B: "Q", 0x265C: "R", 0x265D: "B", 0x265E: "N", 0x265F: "",
+}
 
 SNAPSHOT_JS = r"""() => {
   const visible = (el) => {
