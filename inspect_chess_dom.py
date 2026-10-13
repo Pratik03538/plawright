@@ -6,6 +6,10 @@ bounded DOM queries so large pages are not exhaustively traversed.
 from __future__ import annotations
 
 import os
+import shutil
+import socket
+import subprocess
+import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -14,10 +18,9 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 BASE_DIR = Path(__file__).resolve().parent
-# Use branded Chrome in its own profile (never point at your everyday Chrome profile).
-# Override with CHESS_BROWSER_CHANNEL=chromium if you want the bundled Playwright build.
-BROWSER_CHANNEL = os.environ.get("CHESS_BROWSER_CHANNEL", "chrome").strip() or "chrome"
-PROFILE_DIR = BASE_DIR / "playwright_dom_inspector_chrome_profile"
+# Launch installed Chrome normally with a dedicated profile, then attach Playwright over CDP.
+# This avoids Playwright's normal launch arguments when diagnosing site/game startup.
+PROFILE_DIR = BASE_DIR / "playwright_dom_clean_chrome_profile"
 TARGET_URL = os.environ.get("CHESS_BOT_URL", "https://www.chess.com/play/computer")
 
 DOM_SNAPSHOT_JS = r"""() => {
@@ -172,33 +175,87 @@ INSTALL_WATCHER_JS = r"""() => {
 }"""
 
 
+def find_chrome_executable() -> str:
+    candidates = [
+        Path(os.environ.get("PROGRAMFILES", r"C:\\Program Files")) / "Google/Chrome/Application/chrome.exe",
+        Path(os.environ.get("PROGRAMFILES(X86)", r"C:\\Program Files (x86)")) / "Google/Chrome/Application/chrome.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe",
+    ]
+    found = shutil.which("chrome.exe")
+    if found:
+        candidates.insert(0, Path(found))
+    for candidate in candidates:
+        if str(candidate) and candidate.is_file():
+            return str(candidate)
+    raise SystemExit(
+        "[ERROR] Google Chrome executable not found. Install Chrome or set its path in inspect_chess_dom.py."
+    )
+
+
+def get_free_local_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 def main() -> None:
+    chrome_process = None
+    browser = None
     with sync_playwright() as playwright:
-        context = playwright.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR),
-            channel=BROWSER_CHANNEL,
-            headless=False,
-            no_viewport=True,
-            # Use Chrome's normal Windows sandbox and keep extensions disabled
-            # for this diagnostic run. This may help distinguish browser-profile/
-            # extension interference from a Chess.com bot-engine issue.
-            ignore_default_args=["--no-sandbox"],
-            args=["--start-maximized", "--disable-extensions"],
-        )
         try:
+            chrome_exe = find_chrome_executable()
+            PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+            port = get_free_local_port()
+            endpoint = f"http://127.0.0.1:{port}"
+
+            # Start the installed Chrome executable directly with only the
+            # dedicated profile, remote-debug port and initial URL. This avoids
+            # Playwright's normal browser-launch flags while retaining DOM inspection.
+            command = [
+                chrome_exe,
+                f"--remote-debugging-port={port}",
+                f"--user-data-dir={PROFILE_DIR}",
+                "--start-maximized",
+                "--no-first-run",
+                TARGET_URL,
+            ]
+            chrome_process = subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            print("[DOM INSPECTOR] Started normal Chrome directly (not Playwright-launched).")
+            print(f"[DOM INSPECTOR] Chrome profile: {PROFILE_DIR}")
+            print("[DOM INSPECTOR] No --no-sandbox or --disable-extensions flag is added.")
+
+            last_connect_error = None
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                if chrome_process.poll() is not None:
+                    raise SystemExit(
+                        f"[ERROR] Chrome exited during startup with code {chrome_process.returncode}."
+                    )
+                try:
+                    browser = playwright.chromium.connect_over_cdp(endpoint, timeout=3000)
+                    break
+                except PlaywrightError as exc:
+                    last_connect_error = exc
+                    time.sleep(0.4)
+
+            if browser is None:
+                raise SystemExit(f"[ERROR] Could not attach to Chrome over CDP: {last_connect_error}")
+
+            contexts = browser.contexts
+            if not contexts:
+                raise SystemExit("[ERROR] Chrome connected, but no browser context was available.")
+            context = contexts[0]
             page = context.pages[0] if context.pages else context.new_page()
             page.set_default_timeout(10000)
-            print(f"[DOM INSPECTOR] Browser channel: {BROWSER_CHANNEL} | extensions=disabled | sandbox=default")
-            print(f"[DOM INSPECTOR] Dedicated profile: {PROFILE_DIR}")
+            print(f"[DOM INSPECTOR] Attached to Chrome over CDP: {page.url}")
 
             # Diagnostic-only network logging: redact query strings/fragments so
             # session tokens and other URL parameters are not printed.
             net_counts = {"failed": 0, "http_error": 0}
-
-            def safe_url(url: str) -> str:
-                parts = urlsplit(url)
-                return f"{parts.scheme}://{parts.netloc}{parts.path}"
-
             ad_domains = (
                 "doubleclick.net",
                 "googlesyndication.com",
@@ -212,25 +269,26 @@ def main() -> None:
                 "rubiconproject.com",
             )
 
+            def safe_url(url: str) -> str:
+                parts = urlsplit(url)
+                return f"{parts.scheme}://{parts.netloc}{parts.path}"
+
             def on_request_failed(request) -> None:
                 parts = urlsplit(request.url)
                 host = (parts.hostname or "").lower()
                 failure = request.failure or "no failure detail"
-
-                # Keep noisy ad requests from hiding failures in site/game assets.
                 if any(host == domain or host.endswith("." + domain) for domain in ad_domains):
                     return
                 if net_counts["failed"] >= 60:
                     return
                 net_counts["failed"] += 1
-                resource_type = request.resource_type
                 print(
-                    f"[NET FAIL] {resource_type} {request.method} {safe_url(request.url)} "
+                    f"[NET FAIL] {request.resource_type} {request.method} {safe_url(request.url)} "
                     f"| {failure}"
                 )
 
             def on_response(response) -> None:
-                if response.status < 400 or net_counts["http_error"] >= 25:
+                if response.status < 400 or net_counts["http_error"] >= 40:
                     return
                 net_counts["http_error"] += 1
                 print(f"[HTTP {response.status}] {safe_url(response.url)}")
@@ -238,18 +296,11 @@ def main() -> None:
             def on_websocket(websocket) -> None:
                 safe_ws_url = safe_url(websocket.url)
                 print(f"[WS OPEN] {safe_ws_url}")
-                websocket.on(
-                    "socketerror",
-                    lambda error: print(f"[WS ERROR] {safe_ws_url} | {error}"),
-                )
-                websocket.on(
-                    "close",
-                    lambda _: print(f"[WS CLOSE] {safe_ws_url}"),
-                )
+                websocket.on("socketerror", lambda error: print(f"[WS ERROR] {safe_ws_url} | {error}"))
+                websocket.on("close", lambda _: print(f"[WS CLOSE] {safe_ws_url}"))
 
             page.on("requestfailed", on_request_failed)
             page.on("response", on_response)
-            page.on("websocket", on_websocket)
             page.on(
                 "console",
                 lambda msg: print(
@@ -258,9 +309,8 @@ def main() -> None:
                 ) if msg.type == "error" else None,
             )
             page.on("pageerror", lambda exc: print(f"[PAGE ERROR] {str(exc)[:800]}"))
-            page.on("crash", lambda _: print("[ERROR] Chromium renderer crashed. Restart the inspector and try again."))
+            page.on("crash", lambda _: print("[ERROR] Chrome renderer crashed."))
             page.on("close", lambda _: print("[WARN] Browser page was closed."))
-            context.on("close", lambda _: print("[WARN] Chromium context closed."))
 
             if not page.url.startswith(TARGET_URL):
                 try:
@@ -268,24 +318,17 @@ def main() -> None:
                 except PlaywrightTimeoutError as exc:
                     print(f"[WARN] Navigation timed out: {exc}")
                     if page.is_closed():
-                        print("[ERROR] Page closed during navigation. Run the command again.")
+                        print("[ERROR] Page closed during navigation. Run the inspector again.")
                         return
 
-            print("\n[DOM INSPECTOR] Browser open:", page.url)
-            print("[DOM INSPECTOR] Sign in if required, start/open the test game, and wait for the board + move list.")
-            input("[DOM INSPECTOR] When the board is visible, return here and press ENTER... ")
-
-            if page.is_closed() or context.pages == []:
-                print("[ERROR] The browser window was closed before the DOM snapshot. Leave it open and retry.")
-                return
+            print("\\n[DOM INSPECTOR] Browser open:", page.url)
+            print("[DOM INSPECTOR] Start/select a Computer bot and wait for the board / any engine error.")
+            input("[DOM INSPECTOR] Once the board or error is visible, return here and press ENTER... ")
 
             snapshot = None
             last_snapshot_error = None
-            # Clicking a bot can navigate from /play/computer to /play/computer/<bot>.
-            # If Enter is pressed during that transition, evaluate may lose its JS context.
-            # Wait for the new document and retry instead of terminating the inspector.
             for attempt in range(1, 5):
-                if page.is_closed() or context.pages == []:
+                if page.is_closed() or not browser.contexts:
                     print("[ERROR] Browser page closed before DOM inspection.")
                     return
                 try:
@@ -298,7 +341,7 @@ def main() -> None:
                 except PlaywrightError as exc:
                     last_snapshot_error = exc
                     print(f"[WARN] DOM snapshot attempt {attempt}/4 interrupted: {exc}")
-                    if page.is_closed() or context.pages == []:
+                    if page.is_closed():
                         break
                     try:
                         page.wait_for_load_state("domcontentloaded", timeout=12000)
@@ -307,10 +350,10 @@ def main() -> None:
 
             if snapshot is None:
                 print(f"[ERROR] Could not inspect DOM after navigation retries: {last_snapshot_error}")
-                print("[HINT] Keep the browser open and rerun the inspector after the bot page settles.")
+                print("[HINT] Keep Chrome open and rerun the inspector after the page settles.")
                 return
 
-            print("\n[DOM SNAPSHOT]")
+            print("\\n[DOM SNAPSHOT]")
             print(f"URL: {snapshot.get('url')}")
             print(f"Title: {snapshot.get('title')}")
             print(f"Ready state: {snapshot.get('readyState')}")
@@ -331,10 +374,10 @@ def main() -> None:
 
             page.expose_binding(
                 "__reportDomDiagnostic",
-                lambda source, records: print(f"\n[DOM CHANGE] {records}"),
+                lambda source, records: print(f"\\n[DOM CHANGE] {records}"),
             )
             watcher = page.evaluate(INSTALL_WATCHER_JS)
-            print(f"\n[DOM INSPECTOR] MutationObserver installed: {watcher.get('installedObservers')} root(s).")
+            print(f"\\n[DOM INSPECTOR] MutationObserver installed: {watcher.get('installedObservers')} root(s).")
             print("[DOM INSPECTOR] Make one move on the test board. Check whether board/piece/move-list changes are reported.")
             print("[DOM INSPECTOR] Press Ctrl+C here to stop.")
             try:
@@ -342,14 +385,20 @@ def main() -> None:
             except KeyboardInterrupt:
                 pass
         except KeyboardInterrupt:
-            print("\n[DOM INSPECTOR] Stopped by user.")
+            print("\\n[DOM INSPECTOR] Stopped by user.")
         except PlaywrightError as exc:
             print(f"[ERROR] Playwright failure: {exc}")
         finally:
-            try:
-                context.close()
-            except Exception:
-                pass
+            # Close the Chrome we spawned, without touching the user's everyday Chrome.
+            if chrome_process is not None and chrome_process.poll() is None:
+                try:
+                    chrome_process.terminate()
+                    chrome_process.wait(timeout=5)
+                except Exception:
+                    try:
+                        chrome_process.kill()
+                    except Exception:
+                        pass
 
 
 if __name__ == "__main__":
