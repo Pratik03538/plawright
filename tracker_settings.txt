@@ -1,0 +1,3 @@
+# Target site settings for seleniumbase_live_game_tracker.py
+site_name=Chess.com
+site_domain=chess.com
