@@ -84,10 +84,15 @@ DOM_SNAPSHOT_JS = r"""() => {
       if (candidates.length >= 120) break;
     }
   }
+  const bodyText = (document.body?.innerText || '').trim();
+  const diagnosticLines = bodyText.split(/\n+/).map(line => line.trim()).filter(line =>
+    /couldn't load the bot engine|loading this bot|connection taking longer|check your connection|reload the page/i.test(line)
+  ).slice(0, 12);
   return {
     url: location.href,
     title: document.title,
     readyState: document.readyState,
+    diagnosticLines,
     totalCandidates: candidates.length,
     inspectedRoots: rootLabels,
     candidates
@@ -274,11 +279,35 @@ def main() -> None:
                 print("[ERROR] The browser window was closed before the DOM snapshot. Leave it open and retry.")
                 return
 
-            try:
-                snapshot = page.evaluate(DOM_SNAPSHOT_JS)
-            except PlaywrightError as exc:
-                print(f"[ERROR] Could not inspect DOM: {exc}")
-                print("[HINT] If Chromium crashed/closed, close other Playwright runs and retry; inspector uses its own profile.")
+            snapshot = None
+            last_snapshot_error = None
+            # Clicking a bot can navigate from /play/computer to /play/computer/<bot>.
+            # If Enter is pressed during that transition, evaluate may lose its JS context.
+            # Wait for the new document and retry instead of terminating the inspector.
+            for attempt in range(1, 5):
+                if page.is_closed() or context.pages == []:
+                    print("[ERROR] Browser page closed before DOM inspection.")
+                    return
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=12000)
+                except PlaywrightTimeoutError:
+                    pass
+                try:
+                    snapshot = page.evaluate(DOM_SNAPSHOT_JS)
+                    break
+                except PlaywrightError as exc:
+                    last_snapshot_error = exc
+                    print(f"[WARN] DOM snapshot attempt {attempt}/4 interrupted: {exc}")
+                    if page.is_closed() or context.pages == []:
+                        break
+                    try:
+                        page.wait_for_load_state("domcontentloaded", timeout=12000)
+                    except PlaywrightTimeoutError:
+                        pass
+
+            if snapshot is None:
+                print(f"[ERROR] Could not inspect DOM after navigation retries: {last_snapshot_error}")
+                print("[HINT] Keep the browser open and rerun the inspector after the bot page settles.")
                 return
 
             print("\n[DOM SNAPSHOT]")
@@ -287,6 +316,7 @@ def main() -> None:
             print(f"Ready state: {snapshot.get('readyState')}")
             print(f"Candidate elements: {snapshot.get('totalCandidates')}")
             print(f"Inspected roots: {snapshot.get('inspectedRoots')}")
+            print(f"Bot/connection messages: {snapshot.get('diagnosticLines')}")
             for index, item in enumerate(snapshot.get("candidates", []), start=1):
                 print(
                     f"#{index} root={item.get('root')} <{item.get('tag')}> "
