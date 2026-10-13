@@ -16,7 +16,7 @@ from playwright.sync_api import sync_playwright
 
 BASE_DIR = Path(__file__).resolve().parent
 PROFILE_DIR = BASE_DIR / ".playwright_hikaru_profile"
-HIKARU_URL = "https://www.chess.com/play/computer/hikaru"
+HIKARU_URL = "https://www.chess.com/play/computer/Hikaru-bot"
 LOGIN_URL = "https://www.chess.com/login"
 DEFAULT_USERNAME = "diamond_membership-free"
 
@@ -154,9 +154,9 @@ def perform_login_if_needed(page) -> bool:
 
 
 def find_play_button(page):
-    """Find the main visible Play button, preferring one below the site navigation."""
+    """Find a real button labelled Play; deliberately ignore navigation links."""
     candidates = []
-    for selector in ("button", '[role="button"]', "a"):
+    for selector in ("button", '[role="button"]'):
         try:
             locator = page.locator(selector)
             for index in range(min(locator.count(), 250)):
@@ -173,12 +173,7 @@ def find_play_button(page):
                 if label.casefold() not in {"play", "start game"}:
                     continue
                 box = item.bounding_box()
-                if not box:
-                    continue
-                href = item.get_attribute("href") or ""
-                # Avoid the top navigation's "Play" link when searching for
-                # the bot's start-game control.
-                if selector == "a" and box["y"] < 140 and "/play/computer" not in href:
+                if not box or box["y"] < 100:
                     continue
                 candidates.append((box["y"], item))
         except Exception:
@@ -206,22 +201,34 @@ def game_looks_active(page) -> bool:
         return False
 
 
+def on_hikaru_page(page) -> bool:
+    """Return True only on the exact Hikaru bot route, not the generic bot picker."""
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(page.url)
+    return (
+        (parsed.hostname or "").lower().endswith("chess.com")
+        and parsed.path.rstrip("/").casefold() == "/play/computer/hikaru-bot"
+    )
+
+
 def wait_for_bot_page(page) -> bool:
-    """Wait briefly for Hikaru's game UI, with one reload on a bot-engine error."""
+    """Wait for the exact Hikaru route; never click the generic bot-picker Play link."""
     retried = False
     deadline = time.time() + 35
 
     while time.time() < deadline:
-        body = page_text(page)
-        if "Hikaru" not in body and "/play/computer/hikaru" not in page.url.lower():
+        if not on_hikaru_page(page):
             page.wait_for_timeout(750)
             continue
 
+        body = page_text(page)
         lower = body.lower()
+
         if "couldn't load the bot engine" in lower:
             if retried:
                 print("[ERROR] Chess.com says it couldn't load the bot engine.")
-                print("[ERROR] Check this separate Chrome window's internet connection, then rerun.")
+                print("[ERROR] This is a bot-engine/page-load issue, not a confirmed game start.")
                 return False
             retried = True
             print("[WARN] Bot engine load error seen; reloading Hikaru page once...")
@@ -229,21 +236,22 @@ def wait_for_bot_page(page) -> bool:
                 page.reload(wait_until="domcontentloaded", timeout=45000)
             except PlaywrightTimeoutError:
                 pass
-            page.wait_for_timeout(3500)
+            page.wait_for_timeout(2500)
             continue
 
         if "loading this bot is taking" in lower:
             page.wait_for_timeout(1000)
             continue
 
-        # The direct path should be Hikaru's page; the page text check prevents
-        # accidentally pressing Play on a different bot if the site redirects.
-        if "/play/computer/hikaru" in page.url.lower() or "hikaru" in lower:
+        # Require the visible bot name to confirm page identity as well as route.
+        if re.search(r"\bHikaru\b", body, re.I):
             return True
 
         page.wait_for_timeout(750)
 
-    print("[ERROR] Hikaru bot page did not become ready in time.")
+    print("[ERROR] The exact Hikaru page was not confirmed.")
+    print("[ERROR] Current URL:", page.url)
+    print("[ERROR] No Play button was clicked. The generic /play/computer page is not enough.")
     return False
 
 
@@ -290,33 +298,48 @@ def main() -> None:
 
             if not wait_for_bot_page(page):
                 print("[INFO] Browser left open for troubleshooting.")
+                input("Troubleshooting ke liye Chrome khula rahega. Exit karne ke liye Enter dabao: ")
                 return
 
             print("[OK] Hikaru bot page confirmed:", page.url)
+            if not on_hikaru_page(page):
+                print("[ERROR] Safety check failed: not on the exact Hikaru URL; no click sent.")
+                print("[ERROR] Current URL:", page.url)
+                input("Chrome khula rahega. Enter dabane par exit hoga: ")
+                return
+
             if game_looks_active(page):
-                print("[OK] A game appears to be active already; no extra Play click sent.")
+                print("[OK] A Hikaru game appears to be active already; no extra Play click sent.")
             else:
                 play_button = find_play_button(page)
                 if play_button is not None:
                     play_button.click()
-                    print("[ACTION] Clicked Play on Hikaru's bot page.")
-                    page.wait_for_timeout(5000)
+                    print("[ACTION] Clicked the visible Play button on the confirmed Hikaru page.")
+                    deadline = time.time() + 15
+                    while time.time() < deadline and not game_looks_active(page):
+                        page.wait_for_timeout(500)
                 else:
-                    print("[WARN] Play button wasn't identified safely.")
-                    input("Hikaru page par Play button manually click karo, phir Enter dabao: ")
+                    print("[WARN] No safe Play button was identified; navigation links will not be clicked.")
+                    input("Hikaru page par game-start Play button manually click karo, phir Enter dabao: ")
 
                 if game_looks_active(page):
                     print("[SUCCESS] Hikaru game appears to have started.")
                 else:
-                    print("[CHECK] Play action was attempted; visually confirm the game in Chrome.")
-                    print("[CHECK] If a confirmation dialog is open, finish it manually.")
+                    print("[CHECK] Game start is not confirmed; no chess moves were made.")
+                    print("[CHECK] Check the open browser for a dialog or loading error.")
 
             print("[DONE] No chess move was made by this script.")
             print("[DONE] Chrome window will stay open until you press Enter here.")
             input("Browser band karne ke liye Enter dabao (window manually bhi band kar sakte ho): ")
         finally:
             # Closing this dedicated context closes only the separate Playwright Chrome.
-            context.close()
+            # If the user already closed the browser manually, suppress the expected
+            # TargetClosedError so the process does not end with a traceback.
+            try:
+                context.close()
+            except Exception as exc:
+                if "TargetClosedError" not in type(exc).__name__ and "Target page, context or browser has been closed" not in str(exc):
+                    raise
 
 
 if __name__ == "__main__":
