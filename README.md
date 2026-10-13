@@ -2,6 +2,25 @@
 
 A separate Playwright-based browser test build adapted from the FAST-MAIN chess vision baseline. The legacy `chesskida` repository and its branches are read-only inputs; this repository is the isolated workspace.
 
+
+## Separate Chrome: log in and start the Hikaru bot
+
+This runner opens a separate, Playwright-controlled Google Chrome profile. It does not attach to or navigate the everyday Chrome window.
+
+Run from PowerShell in this repo:
+
+```powershell
+git pull --ff-only origin main
+python -m pip install -r requirements.txt
+python -m py_compile .\start_hikaru_game.py
+python .\start_hikaru_game.py
+```
+
+The username defaults to `diamond_membership-free`. On the first run, the script asks for the password with hidden input; it does not store the password in source code. The dedicated browser profile keeps the login session between runs and is excluded from Git. If Chess.com presents a CAPTCHA or extra verification, finish it in the opened Chrome window and press Enter in the terminal.
+
+The script opens `https://www.chess.com/play/computer/hikaru`, verifies that the page is Hikaru's bot page, and clicks **Play** if it finds the main start button. It does not make any chess moves. Keep the terminal running while you use the separate Chrome window; press Enter in the terminal to close that Playwright window.
+
+
 ## Browser mode: reuse your existing Chrome window
 
 This build can attach to the already-open Chrome instance so Chess.com loads with that browser's normal setup. It will find the existing Chess.com Computer tab and will not navigate the ChatGPT tab.
