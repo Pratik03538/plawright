@@ -366,6 +366,20 @@ def read_setting_int(settings: dict[str, str], key: str, default: int, low: int,
         return default
 
 
+def is_start_position(fen: str) -> bool:
+    if chess is None:
+        return False
+    try:
+        board = chess.Board(fen)
+        return (
+            board.board_fen() == chess.STARTING_BOARD_FEN
+            and board.turn == chess.WHITE
+            and board.fullmove_number == 1
+            and board.halfmove_clock == 0
+        )
+    except Exception:
+        return False
+
 def same_position(board: "chess.Board", fen: str) -> bool:
     try:
         other = chess.Board(fen)
